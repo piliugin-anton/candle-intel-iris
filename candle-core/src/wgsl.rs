@@ -81,6 +81,12 @@ pub const MATMUL_TILED_BF16: &str = concat!(
     include_str!("../wgsl/matmul_common_bf16.wgsl"),
     include_str!("../wgsl/matmul_tiled_bf16.wgsl")
 );
+pub const MATMUL_TILED_BF16ACC: &str = concat!(
+    include_str!("../wgsl/matmul_common_bf16acc.wgsl"),
+    include_str!("../wgsl/matmul_tiled_bf16acc.wgsl")
+);
+/// Workgroup width for fused SDPA kernels (parallel Q·K dot + value accumulate).
+pub const SDPA_WORKGROUP_SIZE: u32 = 32;
 pub const QMATMUL_Q4_0: &str = concat!(
     include_str!("../wgsl/qmatmul_base.wgsl"),
     include_str!("../wgsl/qmatmul_q4_0_blocks.wgsl"),
@@ -125,6 +131,26 @@ pub const QMATMUL_Q5_0: &str = concat!(
     include_str!("../wgsl/qmatmul_base.wgsl"),
     include_str!("../wgsl/qmatmul_q5_0_blocks.wgsl"),
     include_str!("../wgsl/qmatmul_q5_0.wgsl")
+);
+pub const QMATMUL_Q4_0_F16: &str = concat!(
+    include_str!("../wgsl/qmatmul_base_f16.wgsl"),
+    include_str!("../wgsl/qmatmul_q4_0_blocks.wgsl"),
+    include_str!("../wgsl/qmatmul_q4_0_f16.wgsl")
+);
+pub const QMATMUL_Q5_0_F16: &str = concat!(
+    include_str!("../wgsl/qmatmul_base_f16.wgsl"),
+    include_str!("../wgsl/qmatmul_q5_0_blocks.wgsl"),
+    include_str!("../wgsl/qmatmul_q5_0_f16.wgsl")
+);
+pub const QMATMUL_Q8_0_F16: &str = concat!(
+    include_str!("../wgsl/qmatmul_base_f16.wgsl"),
+    include_str!("../wgsl/qmatmul_q8_0_blocks.wgsl"),
+    include_str!("../wgsl/qmatmul_q8_0_f16.wgsl")
+);
+pub const QMATMUL_Q4_K_F16: &str = concat!(
+    include_str!("../wgsl/qmatmul_base_f16.wgsl"),
+    include_str!("../wgsl/qmatmul_q4k_blocks_f16.wgsl"),
+    include_str!("../wgsl/qmatmul_q4_k_f16.wgsl")
 );
 pub const DEQUANT_Q4_0: &str = concat!(
     include_str!("../wgsl/dequant_base.wgsl"),
@@ -182,6 +208,8 @@ pub const ARGSORT_F16: &str = include_str!("../wgsl/argsort_f16.wgsl");
 pub const ARGSORT_BF16: &str = include_str!("../wgsl/argsort_bf16.wgsl");
 pub const ARGSORT_U32: &str = include_str!("../wgsl/argsort_u32.wgsl");
 pub const WHERE_COND: &str = include_str!("../wgsl/where_cond.wgsl");
+pub const WHERE_COND_F16: &str = include_str!("../wgsl/where_cond_f16.wgsl");
+pub const WHERE_COND_BF16: &str = include_str!("../wgsl/where_cond_bf16.wgsl");
 pub const IM2COL2D: &str = include_str!("../wgsl/im2col2d.wgsl");
 pub const IM2COL2D_F16: &str = include_str!("../wgsl/im2col2d_f16.wgsl");
 pub const IM2COL2D_BF16: &str = include_str!("../wgsl/im2col2d_bf16.wgsl");
@@ -222,6 +250,11 @@ pub const CONST_SET_BF16: &str = concat!(
 pub const CONST_SET_U32: &str = include_str!("../wgsl/const_set_u32.wgsl");
 pub const CONST_SET_U8: &str = include_str!("../wgsl/const_set_u8.wgsl");
 pub const CMP: &str = include_str!("../wgsl/cmp.wgsl");
+pub const CMP_F16: &str = include_str!("../wgsl/cmp_f16.wgsl");
+pub const CMP_BF16: &str = concat!(
+    include_str!("../wgsl/common_bf16.wgsl"),
+    include_str!("../wgsl/cmp_bf16.wgsl")
+);
 pub const RANDOM: &str = include_str!("../wgsl/random.wgsl");
 
 #[cfg(test)]
@@ -250,6 +283,8 @@ mod tests {
         assert!(MATMUL_TILED_F16.contains("fn matmul_tiled_vec_f16"));
         assert!(MATMUL_TILED_F16ACC.contains("fn matmul_tiled_f16acc"));
         assert!(MATMUL_TILED_F16ACC.contains("fn matmul_tiled_vec_f16acc"));
+        assert!(MATMUL_TILED_BF16ACC.contains("fn matmul_tiled_bf16acc"));
+        assert!(MATMUL_TILED_BF16ACC.contains("fn matmul_tiled_vec_bf16acc"));
         assert!(QMATMUL_Q4_0.contains("fn qmatmul_q4_0_f32"));
         assert!(QMATMUL_Q5_0.contains("fn qmatmul_q5_0_f32"));
         assert!(UNARY_F16.contains("fn gelu_f16"));
@@ -317,6 +352,11 @@ mod tests {
         assert!(CONST_SET_U8.contains("fn const_set_u8"));
         assert!(CMP.contains("fn eq_f32"));
         assert!(CMP.contains("fn ge_f32"));
+        assert!(CMP_F16.contains("fn eq_f16"));
+        assert!(CMP_BF16.contains("fn eq_bf16"));
+        assert!(QMATMUL_Q4_0_F16.contains("fn qmatmul_q4_0_f16"));
+        assert!(WHERE_COND_F16.contains("fn where_u8_f16"));
+        assert!(WHERE_COND_BF16.contains("fn where_u8_bf16"));
         assert!(UNARY.contains("fn powf_f32"));
         assert!(UNARY.contains("fn elu_f32"));
         assert!(UNARY_F16.contains("fn powf_f16"));

@@ -166,11 +166,14 @@ impl QWgpuStorage {
         if !layout.is_contiguous() {
             crate::bail!("input tensor is not contiguous {layout:?}")
         }
-        if storage.dtype() != DType::F32 {
-            crate::bail!(
-                "wgpu qmatmul only supports f32 activations, got {:?}",
-                storage.dtype()
-            );
+        match storage.dtype() {
+            DType::F32 | DType::F16 => {}
+            other => {
+                crate::bail!(
+                    "wgpu qmatmul only supports f32/f16 activations, got {:?}",
+                    other
+                );
+            }
         }
 
         let src_shape = layout.shape();

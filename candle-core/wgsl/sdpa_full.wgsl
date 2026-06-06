@@ -2,8 +2,11 @@
 //
 // Entry point: sdpa_full_f32
 //
-// One workgroup per (batch, q_head, q_position). Supports arbitrary q_seq,
-// optional additive mask, and causal masking.
+// One workgroup per (batch, q_head, q_position). Threads cooperatively
+// compute Q·K and update the value accumulator.
+
+const SDPA_WG: u32 = 32u;
+const MAX_V_DIM: u32 = 256u;
 
 struct SdpaParams {
     bs: u32,
@@ -39,6 +42,15 @@ var<storage, read> mask_buf: array<f32>;
 
 @group(0) @binding(5)
 var<storage, read> sdpa_params: SdpaParams;
+
+var<workgroup> partial_dot: array<f32, SDPA_WG>;
+var<workgroup> wg_acc: array<f32, MAX_V_DIM>;
+var<workgroup> wg_max_score: f32;
+var<workgroup> wg_sum_exp: f32;
+var<workgroup> wg_factor: f32;
+var<workgroup> wg_exp_score: f32;
+var<workgroup> wg_inv_sum: f32;
+var<workgroup> wg_skip: u32;
 
 fn bitcast_f32(bits: u32) -> f32 {
     return bitcast<f32>(bits);
@@ -86,8 +98,12 @@ fn is_masked(bs_i: u32, qh: u32, qs: u32, ki: u32) -> bool {
     return false;
 }
 
-@compute @workgroup_size(1)
-fn sdpa_full_f32(@builtin(workgroup_id) wg_id: vec3<u32>) {
+@compute @workgroup_size(SDPA_WG)
+fn sdpa_full_f32(
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+) {
+    let lid = local_id.x;
     let flat = wg_id.x;
     let q_seq = sdpa_params.q_seq;
     let n_q_heads = sdpa_params.n_q_heads;
@@ -112,47 +128,69 @@ fn sdpa_full_f32(@builtin(workgroup_id) wg_id: vec3<u32>) {
     let k_stride_head = k_seq * head_dim;
     let v_stride_head = k_seq * v_dim;
 
-    var max_score = -1e38;
-    var sum_exp = 0.0;
-    var acc: array<f32, 256>;
-
-    for (var d = 0u; d < v_dim; d = d + 1u) {
-        acc[d] = 0.0;
+    for (var d = lid; d < v_dim; d = d + SDPA_WG) {
+        wg_acc[d] = 0.0;
     }
+    if (lid == 0u) {
+        wg_max_score = -1e38;
+        wg_sum_exp = 0.0;
+    }
+    workgroupBarrier();
 
     for (var ki = 0u; ki < k_seq; ki = ki + 1u) {
-        if (is_masked(bs_i, qh, qs, ki)) {
-            continue;
+        if (lid == 0u) {
+            wg_skip = u32(is_masked(bs_i, qh, qs, ki));
         }
+        workgroupBarrier();
 
-        var score = 0.0;
-        for (var d = 0u; d < head_dim; d = d + 1u) {
-            let qv = q_buf[q_index(bs_i, qh, qs, d)];
-            let kv = k_buf[kv_index(bs_i, kvh, ki, d, k_stride_head)];
-            score += qv * kv;
-        }
-        score = score * scale;
-        if (softcapping != 1.0) {
-            score = tanh(score) * softcapping;
-        }
-        if (sdpa_params.has_mask != 0u) {
-            score += mask_buf[mask_index(bs_i, qh, qs, ki)];
-        }
+        if (wg_skip == 0u) {
+            var local_dot = 0.0;
+            for (var d = lid; d < head_dim; d = d + SDPA_WG) {
+                let qv = q_buf[q_index(bs_i, qh, qs, d)];
+                let kv = k_buf[kv_index(bs_i, kvh, ki, d, k_stride_head)];
+                local_dot += qv * kv;
+            }
+            partial_dot[lid] = local_dot;
+            workgroupBarrier();
 
-        let new_max = max(max_score, score);
-        let factor = exp(max_score - new_max);
-        let exp_score = exp(score - new_max);
-        max_score = new_max;
-        sum_exp = sum_exp * factor + exp_score;
+            if (lid == 0u) {
+                var score = 0.0;
+                for (var i = 0u; i < SDPA_WG; i = i + 1u) {
+                    score += partial_dot[i];
+                }
+                score = score * scale;
+                if (softcapping != 1.0) {
+                    score = tanh(score) * softcapping;
+                }
+                if (sdpa_params.has_mask != 0u) {
+                    score += mask_buf[mask_index(bs_i, qh, qs, ki)];
+                }
 
-        for (var d = 0u; d < v_dim; d = d + 1u) {
-            let vv = v_buf[v_index(bs_i, kvh, ki, d, v_stride_head)];
-            acc[d] = acc[d] * factor + exp_score * vv;
+                let new_max = max(wg_max_score, score);
+                wg_factor = exp(wg_max_score - new_max);
+                wg_exp_score = exp(score - new_max);
+                wg_max_score = new_max;
+                wg_sum_exp = wg_sum_exp * wg_factor + wg_exp_score;
+            }
+            workgroupBarrier();
+
+            let factor = wg_factor;
+            let exp_score = wg_exp_score;
+            for (var d = lid; d < v_dim; d = d + SDPA_WG) {
+                let vv = v_buf[v_index(bs_i, kvh, ki, d, v_stride_head)];
+                wg_acc[d] = wg_acc[d] * factor + exp_score * vv;
+            }
+            workgroupBarrier();
         }
     }
 
-    let inv_sum = select(0.0, 1.0 / sum_exp, sum_exp > 0.0);
-    for (var d = 0u; d < v_dim; d = d + 1u) {
-        out_buf[out_index(bs_i, qh, qs, d)] = acc[d] * inv_sum;
+    if (lid == 0u) {
+        wg_inv_sum = select(0.0, 1.0 / wg_sum_exp, wg_sum_exp > 0.0);
+    }
+    workgroupBarrier();
+
+    let inv_sum = wg_inv_sum;
+    for (var d = lid; d < v_dim; d = d + SDPA_WG) {
+        out_buf[out_index(bs_i, qh, qs, d)] = wg_acc[d] * inv_sum;
     }
 }

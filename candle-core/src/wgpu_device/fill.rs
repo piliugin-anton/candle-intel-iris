@@ -98,7 +98,7 @@ pub fn dispatch_const_set(
             dispatch_const_set_kernel(storage, layout, CONST_SET_U8, "const_set_u8", v as u32)
                 .map_err(Error::from)
         }
-        (DType::F16, Scalar::F16(v)) if device.caps().supports_native_f16() => {
+        (DType::F16, Scalar::F16(v)) if device.caps().supports_f16_gpu_kernels() => {
             dispatch_const_set_kernel(
                 storage,
                 layout,
@@ -108,7 +108,7 @@ pub fn dispatch_const_set(
             )
             .map_err(Error::from)
         }
-        (DType::BF16, Scalar::BF16(v)) if device.caps().supports_native_bf16() => {
+        (DType::BF16, Scalar::BF16(v)) if device.caps().supports_bf16_gpu_kernels() => {
             dispatch_const_set_kernel(
                 storage,
                 layout,

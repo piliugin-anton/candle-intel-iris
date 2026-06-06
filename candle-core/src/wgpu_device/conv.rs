@@ -96,12 +96,17 @@ where
 {
     require_float(storage.dtype(), op)?;
     let device = storage.device();
-    let compute_dtype = device.effective_dtype(storage.dtype());
-    if compute_dtype != storage.dtype() {
+    let storage_dtype = storage.dtype();
+    let compute_dtype = if device.caps().has_gpu_kernels_for(storage_dtype) {
+        storage_dtype
+    } else {
+        device.effective_dtype(storage_dtype)
+    };
+    if compute_dtype != storage_dtype {
         let cast = storage.to_dtype(layout, compute_dtype)?;
         let cast_layout = Layout::contiguous(layout.shape());
         let out = f(&cast, &cast_layout, compute_dtype)?;
-        return out.to_dtype(&Layout::contiguous(out_shape), storage.dtype());
+        return out.to_dtype(&Layout::contiguous(out_shape), storage_dtype);
     }
     f(storage, layout, compute_dtype)
 }
@@ -241,8 +246,13 @@ pub fn conv2d(
     }
 
     let device = self_.device();
-    let compute_dtype = device.effective_dtype(self_.dtype());
-    if compute_dtype != self_.dtype() {
+    let storage_dtype = self_.dtype();
+    let compute_dtype = if device.caps().has_gpu_kernels_for(storage_dtype) {
+        storage_dtype
+    } else {
+        device.effective_dtype(storage_dtype)
+    };
+    if compute_dtype != storage_dtype {
         let self_cast = self_.to_dtype(layout, compute_dtype)?;
         let kernel_cast = kernel.to_dtype(kernel_l, compute_dtype)?;
         let layout_cast = Layout::contiguous(layout.shape());
@@ -255,7 +265,7 @@ pub fn conv2d(
             params,
         )?;
         let out_shape = Shape::from((params.b_size, params.c_out, params.out_h(), params.out_w()));
-        return out.to_dtype(&Layout::contiguous(&out_shape), self_.dtype());
+        return out.to_dtype(&Layout::contiguous(&out_shape), storage_dtype);
     }
 
     let h_out = params.out_h();
@@ -315,8 +325,13 @@ pub fn conv1d(
     }
 
     let device = self_.device();
-    let compute_dtype = device.effective_dtype(self_.dtype());
-    if compute_dtype != self_.dtype() {
+    let storage_dtype = self_.dtype();
+    let compute_dtype = if device.caps().has_gpu_kernels_for(storage_dtype) {
+        storage_dtype
+    } else {
+        device.effective_dtype(storage_dtype)
+    };
+    if compute_dtype != storage_dtype {
         let self_cast = self_.to_dtype(layout, compute_dtype)?;
         let kernel_cast = kernel.to_dtype(kernel_l, compute_dtype)?;
         let layout_cast = Layout::contiguous(layout.shape());
@@ -329,7 +344,7 @@ pub fn conv1d(
             params,
         )?;
         let out_shape = Shape::from((params.b_size, params.c_out, params.l_out()));
-        return out.to_dtype(&Layout::contiguous(&out_shape), self_.dtype());
+        return out.to_dtype(&Layout::contiguous(&out_shape), storage_dtype);
     }
 
     let l_out = params.l_out();

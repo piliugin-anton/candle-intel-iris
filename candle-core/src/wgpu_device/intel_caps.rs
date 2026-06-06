@@ -2,8 +2,8 @@ use super::adapter::{is_intel_adapter, pci_id, INTEL_VENDOR_ID};
 use crate::DType;
 use wgpu::{AdapterInfo, Device, DeviceType};
 
-/// Default UMA auto-map threshold: 4 MiB.
-pub const DEFAULT_UMA_AUTO_MAP_THRESHOLD: usize = 4 * 1024 * 1024;
+/// Default UMA auto-map threshold: 32 MiB (typical transformer layer weights).
+pub const DEFAULT_UMA_AUTO_MAP_THRESHOLD: usize = 32 * 1024 * 1024;
 
 /// Intel GPU generation bucket used for dtype and tuning policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +113,26 @@ impl IntelCaps {
     pub fn supports_native_f16(&self) -> bool {
         self.generation == IntelGeneration::Gen12Plus && self.supports_shader_f16
     }
+
+    /// F16 WGSL kernels (`enable f16`) — available on Gen11+ when `SHADER_F16` is enabled.
+    pub fn supports_f16_gpu_kernels(&self) -> bool {
+        self.supports_shader_f16
+    }
+
+    /// Packed bf16 kernels (u32 storage, f32 math) — no special device feature required.
+    pub fn supports_bf16_gpu_kernels(&self) -> bool {
+        true
+    }
+
+    /// Whether GPU kernels can run in the storage dtype without a full-tensor f32 upcast.
+    pub fn has_gpu_kernels_for(&self, dtype: DType) -> bool {
+        match dtype {
+            DType::F32 => true,
+            DType::F16 => self.supports_f16_gpu_kernels(),
+            DType::BF16 => self.supports_bf16_gpu_kernels(),
+            _ => false,
+        }
+    }
 }
 
 /// Detect Intel GPU generation from PCI device id and adapter name.
@@ -220,6 +240,19 @@ mod tests {
         assert_eq!(caps.effective_compute_dtype(DType::F16), DType::F32);
         assert_eq!(caps.effective_compute_dtype(DType::BF16), DType::F32);
         assert_eq!(caps.effective_compute_dtype(DType::F32), DType::F32);
+    }
+
+    #[test]
+    fn gen11_has_f16_gpu_kernels_when_shader_f16() {
+        let caps = IntelCaps {
+            generation: IntelGeneration::Gen11,
+            supports_shader_f16: true,
+            ..IntelCaps::default_fallback()
+        };
+        assert!(!caps.supports_native_f16());
+        assert!(caps.supports_f16_gpu_kernels());
+        assert!(caps.has_gpu_kernels_for(DType::F16));
+        assert!(caps.has_gpu_kernels_for(DType::BF16));
     }
 
     #[test]
