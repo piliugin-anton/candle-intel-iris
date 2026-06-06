@@ -53,12 +53,7 @@ impl QWgpuStorage {
 
     pub fn dequantize(&self, elem_count: usize) -> Result<WgpuStorage> {
         if gpu_dequant_supported(self.dtype) {
-            return dispatch_dequant_f32(
-                &self.device,
-                self.dtype,
-                &self.buffer,
-                elem_count,
-            );
+            return dispatch_dequant_f32(&self.device, self.dtype, &self.buffer, elem_count);
         }
         let mut out = vec![0f32; elem_count];
         dequantize_to_f32(self, &mut out)?;
@@ -172,7 +167,10 @@ impl QWgpuStorage {
             crate::bail!("input tensor is not contiguous {layout:?}")
         }
         if storage.dtype() != DType::F32 {
-            crate::bail!("wgpu qmatmul only supports f32 activations, got {:?}", storage.dtype());
+            crate::bail!(
+                "wgpu qmatmul only supports f32 activations, got {:?}",
+                storage.dtype()
+            );
         }
 
         let src_shape = layout.shape();
@@ -212,7 +210,11 @@ impl QWgpuStorage {
     ) -> Result<(WgpuStorage, Shape)> {
         let bytes = self.data()?;
         let qtensor = super::QTensor::new(
-            QStorage::from_data(std::borrow::Cow::from(bytes), &crate::Device::Cpu, self.dtype)?,
+            QStorage::from_data(
+                std::borrow::Cow::from(bytes),
+                &crate::Device::Cpu,
+                self.dtype,
+            )?,
             self_shape,
         )?;
         let (cpu_out, dst_shape) = qtensor.cpu_fwd(&storage.to_cpu_storage()?, layout)?;
@@ -233,9 +235,8 @@ pub fn load_quantized<T: GgmlType + Send + Sync + 'static>(
     device: &WgpuDevice,
     data: &[T],
 ) -> Result<QStorage> {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(data.as_ptr().cast(), std::mem::size_of_val(data))
-    };
+    let bytes =
+        unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), std::mem::size_of_val(data)) };
     let buffer = upload_quant_weights(device, bytes)?;
     Ok(QStorage::Wgpu(Box::new(QWgpuStorage {
         dtype: T::DTYPE,

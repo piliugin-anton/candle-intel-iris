@@ -25,14 +25,16 @@
 
 #![cfg(feature = "wgpu")]
 
-use candle_core::quantized::k_quants::{self, BlockQ4_0, BlockQ4K, BlockQ5_0, BlockQ8_0};
+use candle_core::quantized::k_quants::{self, BlockQ4K, BlockQ4_0, BlockQ5_0, BlockQ8_0};
 use candle_core::quantized::GgmlType;
 use candle_core::quantized::{GgmlDType, QTensor};
 use candle_core::wgpu_device::{
     dispatch_dequant_f32, dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k, dispatch_qmatmul_q5_0,
     dispatch_qmatmul_q8_0, upload_quant_weights,
 };
-use candle_core::{backend::BackendStorage, Device, DType, IndexOp, Module, Result, Storage, Tensor};
+use candle_core::{
+    backend::BackendStorage, DType, Device, IndexOp, Module, Result, Storage, Tensor,
+};
 
 const EPS: f32 = 1e-4;
 const BF16_EPS: f32 = 0.03;
@@ -148,7 +150,10 @@ fn parity_matmul_f16() -> Result<()> {
     let a_gpu = a_cpu.to_device(&gpu)?;
     let b_gpu = b_cpu.to_device(&gpu)?;
     let out_gpu = a_gpu.matmul(&b_gpu)?;
-    let d = max_abs_diff(&out_cpu.to_dtype(DType::F32)?, &out_gpu.to_dtype(DType::F32)?)?;
+    let d = max_abs_diff(
+        &out_cpu.to_dtype(DType::F32)?,
+        &out_gpu.to_dtype(DType::F32)?,
+    )?;
     assert!(d < 2e-4, "f16 matmul max abs diff {d} >= 2e-4");
 
     Ok(())
@@ -226,12 +231,7 @@ fn parity_qmatmul_q4_0_f32() -> Result<()> {
         )
     };
     let rhs_buf = upload_quant_weights(&wgpu_dev, bytes)?;
-    let out_gpu = dispatch_qmatmul_q4_0(
-        &wgpu_lhs,
-        &rhs_buf,
-        (1, m, n, k),
-        lhs_layout,
-    )?;
+    let out_gpu = dispatch_qmatmul_q4_0(&wgpu_lhs, &rhs_buf, (1, m, n, k), lhs_layout)?;
     let out_gpu_t = Tensor::from_vec(
         match out_gpu.to_cpu_storage()? {
             candle_core::CpuStorage::F32(v) => v,
@@ -279,12 +279,7 @@ fn parity_qmatmul_q5_0_f32() -> Result<()> {
         )
     };
     let rhs_buf = upload_quant_weights(&wgpu_dev, bytes)?;
-    let out_gpu = dispatch_qmatmul_q5_0(
-        &wgpu_lhs,
-        &rhs_buf,
-        (1, m, n, k),
-        lhs_layout,
-    )?;
+    let out_gpu = dispatch_qmatmul_q5_0(&wgpu_lhs, &rhs_buf, (1, m, n, k), lhs_layout)?;
     let out_gpu_t = Tensor::from_vec(
         match out_gpu.to_cpu_storage()? {
             candle_core::CpuStorage::F32(v) => v,
@@ -344,11 +339,7 @@ fn parity_unary_trig_erf_f32() -> Result<()> {
     let gpu = wgpu_device()?;
     let cpu = Device::Cpu;
 
-    let xs_cpu = Tensor::from_vec(
-        vec![-1.0f32, -0.5, 0.0, 0.5, 1.0, 2.0],
-        (2, 3),
-        &cpu,
-    )?;
+    let xs_cpu = Tensor::from_vec(vec![-1.0f32, -0.5, 0.0, 0.5, 1.0, 2.0], (2, 3), &cpu)?;
     let xs_gpu = xs_cpu.to_device(&gpu)?;
 
     assert_parity(&xs_cpu.sin()?, &xs_gpu.sin()?)?;
@@ -384,11 +375,7 @@ fn parity_gelu_affine_reduce_min_f32() -> Result<()> {
     let gpu = wgpu_device()?;
     let cpu = Device::Cpu;
 
-    let xs_cpu = Tensor::from_vec(
-        vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0],
-        (2, 3),
-        &cpu,
-    )?;
+    let xs_cpu = Tensor::from_vec(vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0], (2, 3), &cpu)?;
     let xs_gpu = xs_cpu.to_device(&gpu)?;
     let gelu_cpu = xs_cpu.gelu()?;
     let gelu_gpu = xs_gpu.gelu()?;
@@ -540,7 +527,11 @@ fn parity_rms_norm_f16() -> Result<()> {
     let alpha = Tensor::ones(8, DType::F16, &cpu)?;
     let cpu_out = candle_nn::ops::rms_norm(&xs, &alpha, 1e-5)?;
     let gpu_out = candle_nn::ops::rms_norm(&xs.to_device(&gpu)?, &alpha.to_device(&gpu)?, 1e-5)?;
-    assert_parity_tol(&cpu_out.to_dtype(DType::F32)?, &gpu_out.to_dtype(DType::F32)?, F16_EPS)?;
+    assert_parity_tol(
+        &cpu_out.to_dtype(DType::F32)?,
+        &gpu_out.to_dtype(DType::F32)?,
+        F16_EPS,
+    )?;
     Ok(())
 }
 
@@ -571,10 +562,7 @@ fn parity_arg_sort_f32() -> Result<()> {
     let xs = Tensor::new(&[3.0f32, 1.0, 2.0, 0.5, 4.0, 1.5], &cpu)?.reshape((2, 3))?;
     let cpu_out = xs.arg_sort_last_dim(true)?;
     let gpu_out = xs.to_device(&gpu)?.arg_sort_last_dim(true)?;
-    assert_eq!(
-        cpu_out.to_vec1::<u32>()?,
-        gpu_out.to_vec1::<u32>()?,
-    );
+    assert_eq!(cpu_out.to_vec1::<u32>()?, gpu_out.to_vec1::<u32>()?,);
     Ok(())
 }
 
@@ -599,7 +587,11 @@ fn parity_rms_norm_bf16() -> Result<()> {
     let alpha = Tensor::ones(8, DType::BF16, &cpu)?;
     let cpu_out = candle_nn::ops::rms_norm(&xs, &alpha, 1e-5)?;
     let gpu_out = candle_nn::ops::rms_norm(&xs.to_device(&gpu)?, &alpha.to_device(&gpu)?, 1e-5)?;
-    assert_parity_tol(&cpu_out.to_dtype(DType::F32)?, &gpu_out.to_dtype(DType::F32)?, BF16_EPS)?;
+    assert_parity_tol(
+        &cpu_out.to_dtype(DType::F32)?,
+        &gpu_out.to_dtype(DType::F32)?,
+        BF16_EPS,
+    )?;
     Ok(())
 }
 
@@ -635,7 +627,11 @@ fn parity_rope_f16() -> Result<()> {
         &cos.to_device(&gpu)?,
         &sin.to_device(&gpu)?,
     )?;
-    assert_parity_tol(&cpu_out.to_dtype(DType::F32)?, &gpu_out.to_dtype(DType::F32)?, F16_EPS)?;
+    assert_parity_tol(
+        &cpu_out.to_dtype(DType::F32)?,
+        &gpu_out.to_dtype(DType::F32)?,
+        F16_EPS,
+    )?;
     Ok(())
 }
 
@@ -653,7 +649,11 @@ fn parity_rope_bf16() -> Result<()> {
         &cos.to_device(&gpu)?,
         &sin.to_device(&gpu)?,
     )?;
-    assert_parity_tol(&cpu_out.to_dtype(DType::F32)?, &gpu_out.to_dtype(DType::F32)?, BF16_EPS)?;
+    assert_parity_tol(
+        &cpu_out.to_dtype(DType::F32)?,
+        &gpu_out.to_dtype(DType::F32)?,
+        BF16_EPS,
+    )?;
     Ok(())
 }
 
@@ -909,7 +909,10 @@ fn parity_cast_bf16_roundtrip() -> Result<()> {
     let gpu = wgpu_device()?;
     let cpu = Device::Cpu;
     let xs = Tensor::from_vec(vec![1.0f32, -2.5, 0.0, 3.25, -0.125], (5,), &cpu)?;
-    let roundtrip = xs.to_device(&gpu)?.to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+    let roundtrip = xs
+        .to_device(&gpu)?
+        .to_dtype(DType::BF16)?
+        .to_dtype(DType::F32)?;
     assert_parity(&xs, &roundtrip.to_device(&cpu)?)?;
     Ok(())
 }
@@ -962,7 +965,9 @@ fn parity_add_bf16() -> Result<()> {
     let b = Tensor::rand(-1.0f32, 1.0f32, (2, 8), &cpu)?.to_dtype(DType::BF16)?;
     let d = max_abs_diff(
         &a.add(&b)?.to_dtype(DType::F32)?,
-        &a.to_device(&gpu)?.add(&b.to_device(&gpu)?)?.to_dtype(DType::F32)?,
+        &a.to_device(&gpu)?
+            .add(&b.to_device(&gpu)?)?
+            .to_dtype(DType::F32)?,
     )?;
     assert!(d < BF16_EPS, "bf16 add max abs diff {d} >= {BF16_EPS}");
     Ok(())
@@ -997,7 +1002,9 @@ fn parity_mul_bf16() -> Result<()> {
     let b = Tensor::rand(-1.0f32, 1.0f32, (2, 8), &cpu)?.to_dtype(DType::BF16)?;
     let d = max_abs_diff(
         &a.mul(&b)?.to_dtype(DType::F32)?,
-        &a.to_device(&gpu)?.mul(&b.to_device(&gpu)?)?.to_dtype(DType::F32)?,
+        &a.to_device(&gpu)?
+            .mul(&b.to_device(&gpu)?)?
+            .to_dtype(DType::F32)?,
     )?;
     assert!(d < BF16_EPS, "bf16 mul max abs diff {d} >= {BF16_EPS}");
     Ok(())
@@ -1012,7 +1019,9 @@ fn parity_add_f16() -> Result<()> {
     let b = Tensor::rand(-1.0f32, 1.0f32, (2, 8), &cpu)?.to_dtype(DType::F16)?;
     let d = max_abs_diff(
         &a.add(&b)?.to_dtype(DType::F32)?,
-        &a.to_device(&gpu)?.add(&b.to_device(&gpu)?)?.to_dtype(DType::F32)?,
+        &a.to_device(&gpu)?
+            .add(&b.to_device(&gpu)?)?
+            .to_dtype(DType::F32)?,
     )?;
     assert!(d < F16_EPS, "f16 add max abs diff {d} >= {F16_EPS}");
     Ok(())
@@ -1187,9 +1196,7 @@ fn parity_conv2d_tiny_f32() -> Result<()> {
     let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (1, 1, 2, 2), &cpu)?;
     let w = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (1, 1, 2, 2), &cpu)?;
     let out_cpu = t.conv2d(&w, 0, 1, 1, 1)?;
-    let out_gpu = t
-        .to_device(&gpu)?
-        .conv2d(&w.to_device(&gpu)?, 0, 1, 1, 1)?;
+    let out_gpu = t.to_device(&gpu)?.conv2d(&w.to_device(&gpu)?, 0, 1, 1, 1)?;
     assert_parity(&out_cpu, &out_gpu)?;
     Ok(())
 }
@@ -1216,9 +1223,7 @@ fn parity_conv2d_f32() -> Result<()> {
     let t = Tensor::rand(-1.0f32, 1.0f32, (1, 3, 8, 8), &cpu)?;
     let w = Tensor::rand(-1.0f32, 1.0f32, (4, 3, 3, 3), &cpu)?;
     let out_cpu = t.conv2d(&w, 1, 1, 1, 1)?;
-    let out_gpu = t
-        .to_device(&gpu)?
-        .conv2d(&w.to_device(&gpu)?, 1, 1, 1, 1)?;
+    let out_gpu = t.to_device(&gpu)?.conv2d(&w.to_device(&gpu)?, 1, 1, 1, 1)?;
     assert_parity(&out_cpu, &out_gpu)?;
     Ok(())
 }
@@ -1231,9 +1236,7 @@ fn parity_conv1d_f32() -> Result<()> {
     let t = Tensor::rand(-1.0f32, 1.0f32, (2, 4, 16), &cpu)?;
     let w = Tensor::rand(-1.0f32, 1.0f32, (3, 4, 3), &cpu)?;
     let out_cpu = t.conv1d(&w, 0, 1, 1, 1)?;
-    let out_gpu = t
-        .to_device(&gpu)?
-        .conv1d(&w.to_device(&gpu)?, 0, 1, 1, 1)?;
+    let out_gpu = t.to_device(&gpu)?.conv1d(&w.to_device(&gpu)?, 0, 1, 1, 1)?;
     assert_parity(&out_cpu, &out_gpu)?;
     Ok(())
 }
@@ -1360,22 +1363,13 @@ fn parity_const_set_u32_strided() -> Result<()> {
     tensor_cpu.const_set(42u32.into())?;
     let tensor_gpu = Tensor::zeros((3, 4), DType::U32, &gpu)?;
     tensor_gpu.const_set(42u32.into())?;
-    assert_eq!(
-        tensor_cpu.to_vec2::<u32>()?,
-        tensor_gpu.to_vec2::<u32>()?
-    );
+    assert_eq!(tensor_cpu.to_vec2::<u32>()?, tensor_gpu.to_vec2::<u32>()?);
     tensor_cpu.i((.., 2))?.const_set(1337u32.into())?;
     tensor_gpu.i((.., 2))?.const_set(1337u32.into())?;
-    assert_eq!(
-        tensor_cpu.to_vec2::<u32>()?,
-        tensor_gpu.to_vec2::<u32>()?
-    );
+    assert_eq!(tensor_cpu.to_vec2::<u32>()?, tensor_gpu.to_vec2::<u32>()?);
     tensor_cpu.i((2, ..))?.const_set(1u32.into())?;
     tensor_gpu.i((2, ..))?.const_set(1u32.into())?;
-    assert_eq!(
-        tensor_cpu.to_vec2::<u32>()?,
-        tensor_gpu.to_vec2::<u32>()?
-    );
+    assert_eq!(tensor_cpu.to_vec2::<u32>()?, tensor_gpu.to_vec2::<u32>()?);
     Ok(())
 }
 
@@ -1453,9 +1447,7 @@ fn parity_conv2d_f16() -> Result<()> {
     let t = Tensor::rand(-1.0f32, 1.0f32, (1, 3, 8, 8), &cpu)?.to_dtype(DType::F16)?;
     let w = Tensor::rand(-1.0f32, 1.0f32, (4, 3, 3, 3), &cpu)?.to_dtype(DType::F16)?;
     let out_cpu = t.conv2d(&w, 1, 1, 1, 1)?;
-    let out_gpu = t
-        .to_device(&gpu)?
-        .conv2d(&w.to_device(&gpu)?, 1, 1, 1, 1)?;
+    let out_gpu = t.to_device(&gpu)?.conv2d(&w.to_device(&gpu)?, 1, 1, 1, 1)?;
     assert_parity_f16(&out_cpu, &out_gpu)?;
     Ok(())
 }
@@ -1497,10 +1489,11 @@ fn parity_conv2d_bf16() -> Result<()> {
     let out_cpu = t
         .to_dtype(DType::F32)?
         .conv2d(&w.to_dtype(DType::F32)?, 1, 1, 1, 1)?;
-    let out_gpu = t
-        .to_device(&gpu)?
-        .conv2d(&w.to_device(&gpu)?, 1, 1, 1, 1)?;
-    let d = max_abs_diff(&out_cpu.to_dtype(DType::F32)?, &out_gpu.to_dtype(DType::F32)?)?;
+    let out_gpu = t.to_device(&gpu)?.conv2d(&w.to_device(&gpu)?, 1, 1, 1, 1)?;
+    let d = max_abs_diff(
+        &out_cpu.to_dtype(DType::F32)?,
+        &out_gpu.to_dtype(DType::F32)?,
+    )?;
     assert!(d < BF16_EPS, "bf16 conv2d max abs diff {d} >= {BF16_EPS}");
     Ok(())
 }

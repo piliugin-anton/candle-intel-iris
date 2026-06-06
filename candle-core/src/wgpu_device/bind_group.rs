@@ -1124,16 +1124,40 @@ mod tests {
         assert_eq!(std::mem::size_of::<KernelUniforms>() % 16, 0);
         assert_eq!(std::mem::size_of::<KernelUniforms>(), STANDARD_UNIFORM_SIZE);
         assert_eq!(std::mem::size_of::<MatMulUniforms>(), STANDARD_UNIFORM_SIZE);
-        assert_eq!(std::mem::size_of::<QMatMulUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(
+            std::mem::size_of::<QMatMulUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
         assert_eq!(std::mem::size_of::<ReduceUniforms>(), STANDARD_UNIFORM_SIZE);
-        assert_eq!(std::mem::size_of::<Im2col2dUniforms>(), STANDARD_UNIFORM_SIZE);
-        assert_eq!(std::mem::size_of::<Im2col1dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(
+            std::mem::size_of::<Im2col2dUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
+        assert_eq!(
+            std::mem::size_of::<Im2col1dUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
         assert_eq!(std::mem::size_of::<Pool2dUniforms>(), STANDARD_UNIFORM_SIZE);
-        assert_eq!(std::mem::size_of::<UpsampleNearest1dUniforms>(), STANDARD_UNIFORM_SIZE);
-        assert_eq!(std::mem::size_of::<UpsampleNearest2dUniforms>(), STANDARD_UNIFORM_SIZE);
-        assert_eq!(std::mem::size_of::<UpsampleBilinear2dUniforms>(), STANDARD_UNIFORM_SIZE);
-        assert_eq!(std::mem::size_of::<ConvTranspose2dUniforms>(), STANDARD_UNIFORM_SIZE);
-        assert_eq!(std::mem::size_of::<ConvTranspose1dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(
+            std::mem::size_of::<UpsampleNearest1dUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
+        assert_eq!(
+            std::mem::size_of::<UpsampleNearest2dUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
+        assert_eq!(
+            std::mem::size_of::<UpsampleBilinear2dUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
+        assert_eq!(
+            std::mem::size_of::<ConvTranspose2dUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
+        assert_eq!(
+            std::mem::size_of::<ConvTranspose1dUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
     }
 
     #[test]

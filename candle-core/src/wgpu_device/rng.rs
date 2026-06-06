@@ -1,9 +1,9 @@
 use super::error::Result;
-use crate::backend::BackendStorage;
 use super::kernel::WgpuKernel;
 use super::shader_cache::RANDOM_KERNEL_LAYOUT_KEY;
 use super::storage::WgpuStorage;
 use super::WgpuDevice;
+use crate::backend::BackendStorage;
 use crate::wgsl::RANDOM;
 use crate::{DType, Error, Layout, Result as CandleResult, Shape};
 use std::sync::{Arc, RwLock};
@@ -165,7 +165,10 @@ fn dispatch_random_f32(
     param1: f32,
 ) -> CandleResult<WgpuStorage> {
     let elem_count = shape.elem_count();
-    let mut seed = device.rng_seed().write().map_err(|e| Error::Msg(e.to_string()))?;
+    let mut seed = device
+        .rng_seed()
+        .write()
+        .map_err(|e| Error::Msg(e.to_string()))?;
     let uniforms = RandomUniforms::new(elem_count, *seed, param0, param1);
     *seed = seed.wrapping_add(elem_count as u64);
 
@@ -196,13 +199,7 @@ pub fn dispatch_rand_uniform_f32(
     lo: f64,
     up: f64,
 ) -> CandleResult<WgpuStorage> {
-    dispatch_random_f32(
-        device,
-        shape,
-        "rand_uniform_f32",
-        lo as f32,
-        up as f32,
-    )
+    dispatch_random_f32(device, shape, "rand_uniform_f32", lo as f32, up as f32)
 }
 
 pub fn dispatch_rand_normal_f32(
@@ -211,13 +208,7 @@ pub fn dispatch_rand_normal_f32(
     mean: f64,
     stddev: f64,
 ) -> CandleResult<WgpuStorage> {
-    dispatch_random_f32(
-        device,
-        shape,
-        "rand_normal_f32",
-        mean as f32,
-        stddev as f32,
-    )
+    dispatch_random_f32(device, shape, "rand_normal_f32", mean as f32, stddev as f32)
 }
 
 pub fn dispatch_rand_uniform(

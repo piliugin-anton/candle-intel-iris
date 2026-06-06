@@ -85,18 +85,16 @@ pub fn dispatch_arg_sort_last_dim(
     };
     let (shader, entry) = argsort_entry(dtype, asc)
         .ok_or_else(|| Error::UnsupportedDTypeForOp(dtype, "argsort").bt())?;
-    let kernel =
-        WgpuKernel::compile_with_workgroup_size(device, shader, entry, ARGSORT_WG_SIZE)?;
+    let kernel = WgpuKernel::compile_with_workgroup_size(device, shader, entry, ARGSORT_WG_SIZE)?;
     let in0 = buffer_offset(storage, layout);
-    let bind_group = BindGroupBuilder::new()
-        .create_bind_group_bytes(
-            device.device(),
-            device.queue(),
-            buffer_offset(&out, &out_layout),
-            in0.clone(),
-            Some(in0),
-            uniforms.as_bytes(),
-        )?;
+    let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
+        device.device(),
+        device.queue(),
+        buffer_offset(&out, &out_layout),
+        in0.clone(),
+        Some(in0),
+        uniforms.as_bytes(),
+    )?;
     storage
         .backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [nrows as u32, 1, 1]))?;

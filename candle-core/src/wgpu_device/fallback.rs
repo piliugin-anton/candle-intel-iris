@@ -8,7 +8,8 @@ use crate::custom_op::{CustomOp1, CustomOp2, CustomOp3, InplaceOp1, InplaceOp2, 
 use crate::{Layout, Shape};
 
 fn storage_from_cpu(device: &WgpuDevice, cpu: crate::CpuStorage) -> Result<WgpuStorage> {
-    WgpuStorage::from_cpu(device, &cpu)}
+    WgpuStorage::from_cpu(device, &cpu)
+}
 
 /// Runs `op` on CPU and uploads the result to wgpu storage.
 pub fn cpu_fallback_op1<C: CustomOp1 + ?Sized>(
@@ -16,7 +17,9 @@ pub fn cpu_fallback_op1<C: CustomOp1 + ?Sized>(
     storage: &WgpuStorage,
     layout: &Layout,
 ) -> Result<(WgpuStorage, Shape)> {
-    let cpu = storage.to_cpu_storage().map_err(|e| super::error::WgpuError::Message(e.to_string()))?;
+    let cpu = storage
+        .to_cpu_storage()
+        .map_err(|e| super::error::WgpuError::Message(e.to_string()))?;
     let (out, shape) = op
         .cpu_fwd(&cpu, layout)
         .map_err(|e| super::error::WgpuError::Message(e.to_string()))?;

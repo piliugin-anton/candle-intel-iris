@@ -1,17 +1,47 @@
 use super::bind_group::{BindGroupBuilder, IndexingUniforms};
 use super::error::{Result, WgpuError};
 use super::kernel::WgpuKernel;
-use super::ops::dispatch_copy_strided_src;
+use super::ops::{dispatch_copy_strided_src, dispatch_copy_strided_u32};
 use super::storage::{buffer_offset, WgpuStorage};
 use crate::backend::BackendStorage;
 use crate::wgsl::INDEXING;
 use crate::{DType, Error, Layout, Result as CandleResult, Shape};
 
-fn require_contiguous(layout: &Layout, op: &'static str) -> CandleResult<()> {
-    if layout.contiguous_offsets().is_some() {
-        Ok(())
-    } else {
-        Err(Error::RequiresContiguous { op }.bt())
+/// Materialize broadcast/strided float activations on GPU before indexing kernels run.
+fn ensure_contiguous_float(
+    storage: &WgpuStorage,
+    layout: &Layout,
+) -> CandleResult<(WgpuStorage, Layout)> {
+    if layout.is_contiguous() {
+        return Ok((storage.clone(), layout.clone()));
+    }
+    let out = WgpuStorage::alloc(storage.device(), layout.shape(), storage.dtype())
+        .map_err(Error::from)?;
+    let out_layout = Layout::contiguous(layout.shape());
+    let mut out_mut = out.clone();
+    dispatch_copy_strided_src(storage, &mut out_mut, 0, layout).map_err(Error::from)?;
+    Ok((out, out_layout))
+}
+
+/// Materialize broadcast/strided index tensors (u32/i32) on GPU — common in MoE routing.
+fn ensure_contiguous_ids(
+    storage: &WgpuStorage,
+    layout: &Layout,
+) -> CandleResult<(WgpuStorage, Layout)> {
+    if layout.is_contiguous() {
+        return Ok((storage.clone(), layout.clone()));
+    }
+    match storage.dtype() {
+        DType::U32 | DType::I32 => {
+            let out = WgpuStorage::alloc(storage.device(), layout.shape(), storage.dtype())
+                .map_err(Error::from)?;
+            let out_layout = Layout::contiguous(layout.shape());
+            let mut out_mut = out.clone();
+            dispatch_copy_strided_u32(storage, &mut out_mut, 0, layout).map_err(Error::from)?;
+            Ok((out, out_layout))
+        }
+        // U8 indices are byte-packed; uncommon strided layouts use the CPU path upstream.
+        _ => Err(Error::RequiresContiguous { op: "indexing-ids" }.bt()),
     }
 }
 
@@ -69,7 +99,12 @@ fn indexing_data_as_f32(
 
 fn compile_indexing_kernel(device: &super::WgpuDevice, entry: &str) -> Result<WgpuKernel> {
     let tuned = super::intel_caps::tune_shader_source(INDEXING, device.caps());
-    WgpuKernel::compile_with_workgroup_size(device, &tuned, entry, device.caps().elem_workgroup_size)
+    WgpuKernel::compile_with_workgroup_size(
+        device,
+        &tuned,
+        entry,
+        device.caps().elem_workgroup_size,
+    )
 }
 
 fn dispatch_indexing(
@@ -110,8 +145,7 @@ pub fn gather_via_cpu(
 ) -> CandleResult<WgpuStorage> {
     let src_cpu = src.to_cpu_storage()?;
     let ids_cpu = ids.to_cpu_storage()?;
-    let out_cpu = src_cpu
-        .gather(src_l, &ids_cpu, ids_l, dim)?;
+    let out_cpu = src_cpu.gather(src_l, &ids_cpu, ids_l, dim)?;
     WgpuStorage::from_cpu(src.device(), &out_cpu).map_err(Error::from)
 }
 
@@ -124,8 +158,7 @@ pub fn index_select_via_cpu(
 ) -> CandleResult<WgpuStorage> {
     let src_cpu = src.to_cpu_storage()?;
     let ids_cpu = ids.to_cpu_storage()?;
-    let out_cpu = src_cpu
-        .index_select(&ids_cpu, src_l, ids_l, dim)?;
+    let out_cpu = src_cpu.index_select(&ids_cpu, src_l, ids_l, dim)?;
     WgpuStorage::from_cpu(src.device(), &out_cpu).map_err(Error::from)
 }
 
@@ -141,8 +174,7 @@ pub fn index_add_via_cpu(
     let dst_cpu = dst.to_cpu_storage()?;
     let ids_cpu = ids.to_cpu_storage()?;
     let src_cpu = src.to_cpu_storage()?;
-    let out_cpu = dst_cpu
-        .index_add(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
+    let out_cpu = dst_cpu.index_add(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
     WgpuStorage::from_cpu(dst.device(), &out_cpu).map_err(Error::from)
 }
 
@@ -160,11 +192,9 @@ pub fn scatter_via_cpu(
     let ids_cpu = ids.to_cpu_storage()?;
     let src_cpu = src.to_cpu_storage()?;
     if add {
-        dst_cpu
-            .scatter_add_set(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
+        dst_cpu.scatter_add_set(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
     } else {
-        dst_cpu
-            .scatter_set(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
+        dst_cpu.scatter_set(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
     }
     *dst = WgpuStorage::from_cpu(dst.device(), &dst_cpu).map_err(Error::from)?;
     Ok(())
@@ -181,10 +211,17 @@ pub fn dispatch_gather_f32(
         return gather_via_cpu(src, src_l, ids, ids_l, dim);
     }
     let (src_f32, src_f32_l, restore_dtype) = indexing_data_as_f32(src, src_l)?;
-    require_contiguous(&src_f32_l, "gather")?;
-    require_contiguous(ids_l, "gather")?;
-    let entry = indexing_entry(ids.dtype(), "gather")
-        .ok_or_else(|| WgpuError::Message(format!("wgpu gather unsupported ids {:?}", ids.dtype())))?;
+    let (src_f32, src_f32_l) = match ensure_contiguous_float(&src_f32, &src_f32_l) {
+        Ok(v) => v,
+        Err(_) => return gather_via_cpu(src, src_l, ids, ids_l, dim),
+    };
+    let (ids, ids_l) = match ensure_contiguous_ids(ids, ids_l) {
+        Ok(v) => v,
+        Err(_) => return gather_via_cpu(src, src_l, ids, ids_l, dim),
+    };
+    let entry = indexing_entry(ids.dtype(), "gather").ok_or_else(|| {
+        WgpuError::Message(format!("wgpu gather unsupported ids {:?}", ids.dtype()))
+    })?;
     let (left, src_dim, src_right) = split_dim(src_f32_l.dims(), dim);
     let ids_dim = ids_l.dims()[dim];
     let ids_right: usize = ids_l.dims()[dim + 1..].iter().product();
@@ -210,8 +247,8 @@ pub fn dispatch_gather_f32(
         &out_layout,
         &src_f32,
         &src_f32_l,
-        ids,
-        ids_l,
+        &ids,
+        &ids_l,
     )
     .map_err(Error::from)?;
     if let Some(dtype) = restore_dtype {
@@ -231,8 +268,14 @@ pub fn dispatch_index_select_f32(
         return index_select_via_cpu(src, src_l, ids, ids_l, dim);
     }
     let (src_f32, src_f32_l, restore_dtype) = indexing_data_as_f32(src, src_l)?;
-    require_contiguous(&src_f32_l, "index-select")?;
-    require_contiguous(ids_l, "index-select")?;
+    let (src_f32, src_f32_l) = match ensure_contiguous_float(&src_f32, &src_f32_l) {
+        Ok(v) => v,
+        Err(_) => return index_select_via_cpu(src, src_l, ids, ids_l, dim),
+    };
+    let (ids, ids_l) = match ensure_contiguous_ids(ids, ids_l) {
+        Ok(v) => v,
+        Err(_) => return index_select_via_cpu(src, src_l, ids, ids_l, dim),
+    };
     let entry = indexing_entry(ids.dtype(), "index_select").ok_or_else(|| {
         WgpuError::Message(format!(
             "wgpu index_select unsupported ids {:?}",
@@ -265,8 +308,8 @@ pub fn dispatch_index_select_f32(
         &out_layout,
         &src_f32,
         &src_f32_l,
-        ids,
-        ids_l,
+        &ids,
+        &ids_l,
     )
     .map_err(Error::from)?;
     if let Some(dtype) = restore_dtype {
@@ -289,11 +332,18 @@ pub fn dispatch_scatter_f32(
         return scatter_via_cpu(dst, dst_l, ids, ids_l, src, src_l, dim, add);
     }
     let (src_f32, src_f32_l, _) = indexing_data_as_f32(src, src_l)?;
-    require_contiguous(ids_l, "scatter")?;
-    require_contiguous(&src_f32_l, "scatter")?;
+    let (src_f32, src_f32_l) = match ensure_contiguous_float(&src_f32, &src_f32_l) {
+        Ok(v) => v,
+        Err(_) => return scatter_via_cpu(dst, dst_l, ids, ids_l, src, src_l, dim, add),
+    };
+    let (ids, ids_l) = match ensure_contiguous_ids(ids, ids_l) {
+        Ok(v) => v,
+        Err(_) => return scatter_via_cpu(dst, dst_l, ids, ids_l, src, src_l, dim, add),
+    };
     let op = if add { "scatter_add" } else { "scatter" };
-    let entry = indexing_entry(ids.dtype(), op)
-        .ok_or_else(|| WgpuError::Message(format!("wgpu {op} unsupported ids {:?}", ids.dtype())))?;
+    let entry = indexing_entry(ids.dtype(), op).ok_or_else(|| {
+        WgpuError::Message(format!("wgpu {op} unsupported ids {:?}", ids.dtype()))
+    })?;
     let (left, src_dim, right) = split_dim(src_f32_l.dims(), dim);
     let device = dst.device().clone();
 
@@ -310,29 +360,22 @@ pub fn dispatch_scatter_f32(
             _pad: [0; 66],
         };
         dispatch_indexing(
-            &device,
-            entry,
-            elem_count,
-            uniforms,
-            dst_buf,
-            dst_buf_l,
-            &src_f32,
-            &src_f32_l,
-            ids,
-            ids_l,
+            &device, entry, elem_count, uniforms, dst_buf, dst_buf_l, &src_f32, &src_f32_l, &ids,
+            &ids_l,
         )
         .map_err(Error::from)
     };
 
+    if !dst_l.is_contiguous() {
+        return scatter_via_cpu(dst, dst_l, &ids, &ids_l, src, src_l, dim, add);
+    }
     if matches!(dst.dtype(), DType::F16 | DType::BF16) {
         let dtype = dst.dtype();
         let mut dst_f32 = dst.to_dtype(dst_l, DType::F32)?;
         let dst_f32_l = Layout::contiguous(dst_l.shape());
-        require_contiguous(&dst_f32_l, "scatter")?;
         run(&mut dst_f32, &dst_f32_l)?;
         *dst = dst_f32.to_dtype(&dst_f32_l, dtype)?;
     } else {
-        require_contiguous(dst_l, "scatter")?;
         run(dst, dst_l)?;
     }
     Ok(())
@@ -352,8 +395,18 @@ pub fn dispatch_index_add_f32(
     }
     let (dst_f32, dst_f32_l, dst_restore) = indexing_data_as_f32(dst, dst_l)?;
     let (src_f32, src_f32_l, _) = indexing_data_as_f32(src, src_l)?;
-    require_contiguous(ids_l, "index-add")?;
-    require_contiguous(&src_f32_l, "index-add")?;
+    let (src_f32, src_f32_l) = match ensure_contiguous_float(&src_f32, &src_f32_l) {
+        Ok(v) => v,
+        Err(_) => return index_add_via_cpu(dst, dst_l, ids, ids_l, src, src_l, dim),
+    };
+    let (ids, ids_l) = match ensure_contiguous_ids(ids, ids_l) {
+        Ok(v) => v,
+        Err(_) => return index_add_via_cpu(dst, dst_l, ids, ids_l, src, src_l, dim),
+    };
+    let (dst_f32, dst_f32_l) = match ensure_contiguous_float(&dst_f32, &dst_f32_l) {
+        Ok(v) => v,
+        Err(_) => return index_add_via_cpu(dst, dst_l, &ids, &ids_l, src, src_l, dim),
+    };
     let entry = indexing_entry(ids.dtype(), "index_add").ok_or_else(|| {
         WgpuError::Message(format!("wgpu index_add unsupported ids {:?}", ids.dtype()))
     })?;
@@ -383,8 +436,8 @@ pub fn dispatch_index_add_f32(
         &acc_layout,
         &src_f32,
         &src_f32_l,
-        ids,
-        ids_l,
+        &ids,
+        &ids_l,
     )
     .map_err(Error::from)?;
     if let Some(dtype) = dst_restore {
@@ -411,6 +464,15 @@ mod tests {
         let device = WgpuDevice::new_test(false, 4096);
         compile_indexing_kernel(&device, "gather_f32_u32").expect("gather kernel compiles");
         compile_indexing_kernel(&device, "gather_f32_i32").expect("gather i32 kernel compiles");
+    }
+
+    #[test]
+    fn copy_strided_u32_kernel_compiles_on_noop_device() {
+        use super::super::kernel::WgpuKernel;
+        use crate::wgsl::COPY_U32;
+        let device = WgpuDevice::new_test(false, 4096);
+        WgpuKernel::compile_with_workgroup_size(&device, COPY_U32, "copy_strided_u32", 32)
+            .expect("copy_strided_u32 compiles");
     }
 
     #[test]

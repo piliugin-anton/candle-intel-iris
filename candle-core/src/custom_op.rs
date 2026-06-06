@@ -167,7 +167,8 @@ pub trait CustomOp3 {
         s3: &WgpuStorage,
         l3: &Layout,
     ) -> Result<(WgpuStorage, Shape)> {
-        crate::wgpu_device::cpu_fallback_op3(self, s1, l1, s2, l2, s3, l3).map_err(crate::Error::from)
+        crate::wgpu_device::cpu_fallback_op3(self, s1, l1, s2, l2, s3, l3)
+            .map_err(crate::Error::from)
     }
 
     fn bwd(
@@ -347,7 +348,8 @@ pub trait InplaceOp2 {
         s2: &WgpuStorage,
         l2: &Layout,
     ) -> Result<()> {
-        crate::wgpu_device::cpu_fallback_inplace_op2(self, s1, l1, s2, l2).map_err(crate::Error::from)
+        crate::wgpu_device::cpu_fallback_inplace_op2(self, s1, l1, s2, l2)
+            .map_err(crate::Error::from)
     }
 }
 

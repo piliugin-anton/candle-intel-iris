@@ -148,7 +148,12 @@ impl WgpuStorage {
     }
 
     /// Uploads a raw byte slice into a freshly allocated GPU buffer (single host→GPU copy).
-    pub fn from_bytes(device: &WgpuDevice, data: &[u8], elem_count: usize, dtype: DType) -> Result<Self> {
+    pub fn from_bytes(
+        device: &WgpuDevice,
+        data: &[u8],
+        elem_count: usize,
+        dtype: DType,
+    ) -> Result<Self> {
         let expected = elem_count * dtype.size_in_bytes();
         if data.len() != expected {
             return Err(WgpuError::Message(format!(
@@ -237,13 +242,11 @@ impl WgpuStorage {
         let out_shape = layout.shape();
         let out = Self::alloc(&self.device, out_shape, dtype)?;
         let out_layout = Layout::contiguous(out_shape);
-        let kernel = WgpuKernel::compile_with_workgroup_size(&self.device, CAST, entry, 1)?;
-        let uniforms = super::bind_group::KernelUniforms::new(
-            out_layout.shape().elem_count(),
-            &out_layout,
-            layout,
-            None,
-        );
+        let elem_count = out_layout.shape().elem_count();
+        let (wg_size, grid) = cast_dispatch_params(entry, elem_count);
+        let kernel = WgpuKernel::compile_with_workgroup_size(&self.device, CAST, entry, wg_size)?;
+        let uniforms =
+            super::bind_group::KernelUniforms::new(elem_count, &out_layout, layout, None);
         let bind_group_builder = super::bind_group::BindGroupBuilder::new();
         let bind_group = bind_group_builder.create_bind_group_bytes(
             self.device.device(),
@@ -253,9 +256,9 @@ impl WgpuStorage {
             None,
             uniforms.as_bytes(),
         )?;
-        // Cast kernels loop inside a single workgroup (packed f16/bf16/u8 writes are not race-safe).
-        self.backing
-            .with_unmapped(|| kernel.dispatch_bind_group(&self.device, &bind_group, [1, 1, 1]))?;
+        self.backing.with_unmapped(|| {
+            kernel.dispatch_bind_group(&self.device, &bind_group, [grid, 1, 1])
+        })?;
         Ok(out)
     }
 }
@@ -296,6 +299,19 @@ fn read_bytes_staging(device: &WgpuDevice, src: &wgpu::Buffer, size: u64) -> Res
     Ok(bytes)
 }
 
+const CAST_WG_SIZE: u32 = 32;
+
+/// Workgroup size and X grid dimension for parallel cast kernels.
+fn cast_dispatch_params(entry: &str, elem_count: usize) -> (u32, u32) {
+    let parallel_elems = match entry {
+        "cast_f16_f32" | "cast_f32_f16" | "cast_bf16_f32" | "cast_f32_bf16" | "cast_f16_bf16"
+        | "cast_bf16_f16" => elem_count.div_ceil(2),
+        "cast_u8_f32" | "cast_f32_u8" => elem_count.div_ceil(4),
+        _ => elem_count,
+    };
+    (CAST_WG_SIZE, (parallel_elems as u32).div_ceil(CAST_WG_SIZE))
+}
+
 fn cast_entry_point(from: DType, to: DType) -> Option<&'static str> {
     match (from, to) {
         (DType::F32, DType::F16) => Some("cast_f32_f16"),
@@ -306,6 +322,7 @@ fn cast_entry_point(from: DType, to: DType) -> Option<&'static str> {
         (DType::BF16, DType::F16) => Some("cast_bf16_f16"),
         (DType::U8, DType::F32) => Some("cast_u8_f32"),
         (DType::F32, DType::U8) => Some("cast_f32_u8"),
+        (DType::F32, DType::U32) => Some("cast_f32_u32"),
         _ => None,
     }
 }
@@ -561,9 +578,7 @@ impl BackendStorage for WgpuStorage {
         scale_h: Option<f64>,
         scale_w: Option<f64>,
     ) -> CandleResult<Self> {
-        super::conv::upsample_bilinear2d(
-            self, layout, h, w, align_corners, scale_h, scale_w,
-        )
+        super::conv::upsample_bilinear2d(self, layout, h, w, align_corners, scale_h, scale_w)
     }
 
     fn gather(
@@ -632,7 +647,12 @@ impl BackendStorage for WgpuStorage {
         ops::dispatch_matmul(self, rhs, bmnk, lhs_layout, rhs_layout)
     }
 
-    fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> CandleResult<()> {
+    fn copy_strided_src(
+        &self,
+        dst: &mut Self,
+        dst_offset: usize,
+        src_l: &Layout,
+    ) -> CandleResult<()> {
         ops::dispatch_copy_strided_src(self, dst, dst_offset, src_l).map_err(Error::from)
     }
 

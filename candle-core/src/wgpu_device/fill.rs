@@ -13,7 +13,12 @@ fn compile_const_set_kernel(
     entry: &str,
 ) -> Result<WgpuKernel> {
     let tuned = super::intel_caps::tune_shader_source(source, device.caps());
-    WgpuKernel::compile_with_workgroup_size(device, &tuned, entry, device.caps().elem_workgroup_size)
+    WgpuKernel::compile_with_workgroup_size(
+        device,
+        &tuned,
+        entry,
+        device.caps().elem_workgroup_size,
+    )
 }
 
 fn dispatch_const_set_kernel(
@@ -82,31 +87,17 @@ pub fn dispatch_const_set(
     let device = storage.device();
     match (storage.dtype(), scalar) {
         (DType::F32, Scalar::F32(v)) => {
-            dispatch_const_set_kernel(
-                storage,
-                layout,
-                CONST_SET_F32,
-                "const_set_f32",
-                v.to_bits(),
-            )
-            .map_err(Error::from)
+            dispatch_const_set_kernel(storage, layout, CONST_SET_F32, "const_set_f32", v.to_bits())
+                .map_err(Error::from)
         }
-        (DType::U32, Scalar::U32(v)) => dispatch_const_set_kernel(
-            storage,
-            layout,
-            CONST_SET_U32,
-            "const_set_u32",
-            v,
-        )
-        .map_err(Error::from),
-        (DType::U8, Scalar::U8(v)) => dispatch_const_set_kernel(
-            storage,
-            layout,
-            CONST_SET_U8,
-            "const_set_u8",
-            v as u32,
-        )
-        .map_err(Error::from),
+        (DType::U32, Scalar::U32(v)) => {
+            dispatch_const_set_kernel(storage, layout, CONST_SET_U32, "const_set_u32", v)
+                .map_err(Error::from)
+        }
+        (DType::U8, Scalar::U8(v)) => {
+            dispatch_const_set_kernel(storage, layout, CONST_SET_U8, "const_set_u8", v as u32)
+                .map_err(Error::from)
+        }
         (DType::F16, Scalar::F16(v)) if device.caps().supports_native_f16() => {
             dispatch_const_set_kernel(
                 storage,
@@ -127,13 +118,11 @@ pub fn dispatch_const_set(
             )
             .map_err(Error::from)
         }
-        (DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0, _) => Err(
-            Error::Msg(format!(
-                "const_set not supported for dummy type {:?}",
-                storage.dtype()
-            ))
-            .bt(),
-        ),
+        (DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0, _) => Err(Error::Msg(format!(
+            "const_set not supported for dummy type {:?}",
+            storage.dtype()
+        ))
+        .bt()),
         _ => const_set_via_cpu(storage, layout, scalar),
     }
 }

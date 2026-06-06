@@ -10,9 +10,7 @@ use super::ops::{dispatch_copy_strided_src, dispatch_matmul, float_type_suffix, 
 use super::storage::{buffer_offset, WgpuStorage};
 use super::WgpuDevice;
 use crate::backend::BackendStorage;
-use crate::conv::{
-    ParamsConv1D, ParamsConv2D, ParamsConvTranspose1D, ParamsConvTranspose2D,
-};
+use crate::conv::{ParamsConv1D, ParamsConv2D, ParamsConvTranspose1D, ParamsConvTranspose2D};
 use crate::wgsl::{
     CONV_TRANSPOSE1D, CONV_TRANSPOSE1D_BF16, CONV_TRANSPOSE1D_F16, CONV_TRANSPOSE2D,
     CONV_TRANSPOSE2D_BF16, CONV_TRANSPOSE2D_F16, IM2COL1D, IM2COL1D_BF16, IM2COL1D_F16, IM2COL2D,
@@ -154,12 +152,8 @@ fn dispatch_im2col2d(
     dilation: usize,
     dtype: DType,
 ) -> Result<WgpuStorage> {
-    let dst_numel = src_layout.shape().dims()[0]
-        * h_out
-        * w_out
-        * src_layout.shape().dims()[1]
-        * h_k
-        * w_k;
+    let dst_numel =
+        src_layout.shape().dims()[0] * h_out * w_out * src_layout.shape().dims()[1] * h_k * w_k;
     let col = WgpuStorage::alloc(device, &Shape::from(dst_numel), dtype)?;
     let col_layout = Layout::contiguous(Shape::from(dst_numel));
     let uniforms = Im2col2dUniforms {
@@ -389,57 +383,67 @@ pub fn conv_transpose2d(
         &Shape::from((params.b_size, params.c_out, params.out_h(), params.out_w())),
         "conv_transpose2d",
         |self_, layout, compute_dtype| {
-        require_float(kernel.dtype(), "conv_transpose2d")?;
-        if self_.dtype() != kernel.dtype() {
-            return Err(Error::Msg("conv_transpose2d input and kernel dtype mismatch".into()));
-        }
+            require_float(kernel.dtype(), "conv_transpose2d")?;
+            if self_.dtype() != kernel.dtype() {
+                return Err(Error::Msg(
+                    "conv_transpose2d input and kernel dtype mismatch".into(),
+                ));
+            }
 
-        let out_w = params.out_w();
-        let out_h = params.out_h();
-        let dst_el = params.c_out * out_w * out_h * params.b_size;
-        let out_shape = Shape::from((params.b_size, params.c_out, out_h, out_w));
-        let device = self_.device();
-        let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
-        let out_layout = Layout::contiguous(&out_shape);
+            let out_w = params.out_w();
+            let out_h = params.out_h();
+            let dst_el = params.c_out * out_w * out_h * params.b_size;
+            let out_shape = Shape::from((params.b_size, params.c_out, out_h, out_w));
+            let device = self_.device();
+            let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
+            let out_layout = Layout::contiguous(&out_shape);
 
-        let (src, src_layout) = ensure_contiguous(self_, layout)?;
-        let (kernel_storage, kernel_layout) = ensure_contiguous(kernel, kernel_l)?;
+            let (src, src_layout) = ensure_contiguous(self_, layout)?;
+            let (kernel_storage, kernel_layout) = ensure_contiguous(kernel, kernel_l)?;
 
-        let uniforms = ConvTranspose2dUniforms {
-            w_out: out_w as u32,
-            h_out: out_h as u32,
-            stride: params.stride as u32,
-            padding: params.padding as u32,
-            output_padding: params.output_padding as u32,
-            dilation: params.dilation as u32,
-            dst_numel: dst_el as u32,
-            _align: 0,
-            src_layout: TensorLayoutUniform::from_layout(&src_layout),
-            kernel_layout: TensorLayoutUniform::from_layout(&kernel_layout),
-            _pad: [0; 24],
-        };
+            let uniforms = ConvTranspose2dUniforms {
+                w_out: out_w as u32,
+                h_out: out_h as u32,
+                stride: params.stride as u32,
+                padding: params.padding as u32,
+                output_padding: params.output_padding as u32,
+                dilation: params.dilation as u32,
+                dst_numel: dst_el as u32,
+                _align: 0,
+                src_layout: TensorLayoutUniform::from_layout(&src_layout),
+                kernel_layout: TensorLayoutUniform::from_layout(&kernel_layout),
+                _pad: [0; 24],
+            };
 
-        let entry = format!("conv_transpose2d_{}", float_type_suffix(compute_dtype));
-        let wgpu_kernel =
-            WgpuKernel::compile_extended(device, conv_transpose2d_shader(compute_dtype), &entry, 32)
-                .map_err(Error::from)?;
-        let k_off = buffer_offset(&kernel_storage, &kernel_layout);
-        let bind_group = wgpu_kernel
-            .create_extended_bind_group(
+            let entry = format!("conv_transpose2d_{}", float_type_suffix(compute_dtype));
+            let wgpu_kernel = WgpuKernel::compile_extended(
                 device,
-                buffer_offset(&out, &out_layout),
-                buffer_offset(&src, &src_layout),
-                k_off.clone(),
-                k_off,
-                uniforms.as_bytes(),
+                conv_transpose2d_shader(compute_dtype),
+                &entry,
+                32,
             )
             .map_err(Error::from)?;
-        let grid = workgroup_count(device, dst_el);
-        self_.backing()
-            .with_unmapped(|| wgpu_kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
-            .map_err(Error::from)?;
-        Ok(out)
-    })
+            let k_off = buffer_offset(&kernel_storage, &kernel_layout);
+            let bind_group = wgpu_kernel
+                .create_extended_bind_group(
+                    device,
+                    buffer_offset(&out, &out_layout),
+                    buffer_offset(&src, &src_layout),
+                    k_off.clone(),
+                    k_off,
+                    uniforms.as_bytes(),
+                )
+                .map_err(Error::from)?;
+            let grid = workgroup_count(device, dst_el);
+            self_
+                .backing()
+                .with_unmapped(|| {
+                    wgpu_kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1])
+                })
+                .map_err(Error::from)?;
+            Ok(out)
+        },
+    )
 }
 
 pub fn conv_transpose1d(
@@ -455,55 +459,65 @@ pub fn conv_transpose1d(
         &Shape::from((params.b_size, params.c_out, params.l_out())),
         "conv_transpose1d",
         |self_, layout, compute_dtype| {
-        require_float(kernel.dtype(), "conv_transpose1d")?;
-        if self_.dtype() != kernel.dtype() {
-            return Err(Error::Msg("conv_transpose1d input and kernel dtype mismatch".into()));
-        }
+            require_float(kernel.dtype(), "conv_transpose1d")?;
+            if self_.dtype() != kernel.dtype() {
+                return Err(Error::Msg(
+                    "conv_transpose1d input and kernel dtype mismatch".into(),
+                ));
+            }
 
-        let l_out = params.l_out();
-        let dst_el = params.c_out * l_out * params.b_size;
-        let out_shape = Shape::from((params.b_size, params.c_out, l_out));
-        let device = self_.device();
-        let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
-        let out_layout = Layout::contiguous(&out_shape);
+            let l_out = params.l_out();
+            let dst_el = params.c_out * l_out * params.b_size;
+            let out_shape = Shape::from((params.b_size, params.c_out, l_out));
+            let device = self_.device();
+            let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
+            let out_layout = Layout::contiguous(&out_shape);
 
-        let (src, src_layout) = ensure_contiguous(self_, layout)?;
-        let (kernel_storage, kernel_layout) = ensure_contiguous(kernel, kernel_l)?;
+            let (src, src_layout) = ensure_contiguous(self_, layout)?;
+            let (kernel_storage, kernel_layout) = ensure_contiguous(kernel, kernel_l)?;
 
-        let uniforms = ConvTranspose1dUniforms {
-            l_out: l_out as u32,
-            stride: params.stride as u32,
-            padding: params.padding as u32,
-            output_padding: params.output_padding as u32,
-            dilation: params.dilation as u32,
-            dst_numel: dst_el as u32,
-            _align: [0; 2],
-            src_layout: TensorLayoutUniform::from_layout(&src_layout),
-            kernel_layout: TensorLayoutUniform::from_layout(&kernel_layout),
-            _pad: [0; 24],
-        };
+            let uniforms = ConvTranspose1dUniforms {
+                l_out: l_out as u32,
+                stride: params.stride as u32,
+                padding: params.padding as u32,
+                output_padding: params.output_padding as u32,
+                dilation: params.dilation as u32,
+                dst_numel: dst_el as u32,
+                _align: [0; 2],
+                src_layout: TensorLayoutUniform::from_layout(&src_layout),
+                kernel_layout: TensorLayoutUniform::from_layout(&kernel_layout),
+                _pad: [0; 24],
+            };
 
-        let entry = format!("conv_transpose1d_{}", float_type_suffix(compute_dtype));
-        let wgpu_kernel =
-            WgpuKernel::compile_extended(device, conv_transpose1d_shader(compute_dtype), &entry, 32)
-                .map_err(Error::from)?;
-        let k_off = buffer_offset(&kernel_storage, &kernel_layout);
-        let bind_group = wgpu_kernel
-            .create_extended_bind_group(
+            let entry = format!("conv_transpose1d_{}", float_type_suffix(compute_dtype));
+            let wgpu_kernel = WgpuKernel::compile_extended(
                 device,
-                buffer_offset(&out, &out_layout),
-                buffer_offset(&src, &src_layout),
-                k_off.clone(),
-                k_off,
-                uniforms.as_bytes(),
+                conv_transpose1d_shader(compute_dtype),
+                &entry,
+                32,
             )
             .map_err(Error::from)?;
-        let grid = workgroup_count(device, dst_el);
-        self_.backing()
-            .with_unmapped(|| wgpu_kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
-            .map_err(Error::from)?;
-        Ok(out)
-    })
+            let k_off = buffer_offset(&kernel_storage, &kernel_layout);
+            let bind_group = wgpu_kernel
+                .create_extended_bind_group(
+                    device,
+                    buffer_offset(&out, &out_layout),
+                    buffer_offset(&src, &src_layout),
+                    k_off.clone(),
+                    k_off,
+                    uniforms.as_bytes(),
+                )
+                .map_err(Error::from)?;
+            let grid = workgroup_count(device, dst_el);
+            self_
+                .backing()
+                .with_unmapped(|| {
+                    wgpu_kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1])
+                })
+                .map_err(Error::from)?;
+            Ok(out)
+        },
+    )
 }
 
 fn dispatch_pool2d(
@@ -516,9 +530,10 @@ fn dispatch_pool2d(
 ) -> Result<WgpuStorage> {
     let (k_h, k_w) = kernel_size;
     let (s_h, s_w) = stride;
-    let (b, c, h, w) = layout.shape().dims4().map_err(|e| {
-        WgpuError::Message(format!("pool2d expects 4D input: {e}"))
-    })?;
+    let (b, c, h, w) = layout
+        .shape()
+        .dims4()
+        .map_err(|e| WgpuError::Message(format!("pool2d expects 4D input: {e}")))?;
     let h_out = (h - k_h) / s_h + 1;
     let w_out = (w - k_w) / s_w + 1;
     let dst_numel = b * c * h_out * w_out;
@@ -553,7 +568,11 @@ fn dispatch_pool2d(
     Ok(out)
 }
 
-fn pool_out_shape(layout: &Layout, kernel_size: (usize, usize), stride: (usize, usize)) -> CandleResult<Shape> {
+fn pool_out_shape(
+    layout: &Layout,
+    kernel_size: (usize, usize),
+    stride: (usize, usize),
+) -> CandleResult<Shape> {
     let (k_h, k_w) = kernel_size;
     let (s_h, s_w) = stride;
     let (b, c, h, w) = layout.shape().dims4()?;
@@ -569,10 +588,23 @@ pub fn avg_pool2d(
     stride: (usize, usize),
 ) -> CandleResult<WgpuStorage> {
     let out_shape = pool_out_shape(layout, kernel_size, stride)?;
-    with_compute_dtype(storage, layout, &out_shape, "avg_pool2d", |storage, layout, compute_dtype| {
-        dispatch_pool2d(storage, layout, kernel_size, stride, "avg_pool2d", compute_dtype)
+    with_compute_dtype(
+        storage,
+        layout,
+        &out_shape,
+        "avg_pool2d",
+        |storage, layout, compute_dtype| {
+            dispatch_pool2d(
+                storage,
+                layout,
+                kernel_size,
+                stride,
+                "avg_pool2d",
+                compute_dtype,
+            )
             .map_err(Error::from)
-    })
+        },
+    )
 }
 
 pub fn max_pool2d(
@@ -582,10 +614,23 @@ pub fn max_pool2d(
     stride: (usize, usize),
 ) -> CandleResult<WgpuStorage> {
     let out_shape = pool_out_shape(layout, kernel_size, stride)?;
-    with_compute_dtype(storage, layout, &out_shape, "max_pool2d", |storage, layout, compute_dtype| {
-        dispatch_pool2d(storage, layout, kernel_size, stride, "max_pool2d", compute_dtype)
+    with_compute_dtype(
+        storage,
+        layout,
+        &out_shape,
+        "max_pool2d",
+        |storage, layout, compute_dtype| {
+            dispatch_pool2d(
+                storage,
+                layout,
+                kernel_size,
+                stride,
+                "max_pool2d",
+                compute_dtype,
+            )
             .map_err(Error::from)
-    })
+        },
+    )
 }
 
 pub fn upsample_nearest1d(
@@ -595,40 +640,46 @@ pub fn upsample_nearest1d(
 ) -> CandleResult<WgpuStorage> {
     let (b, c, _) = layout.shape().dims3()?;
     let out_shape = Shape::from((b, c, dst_sz));
-    with_compute_dtype(storage, layout, &out_shape, "upsample_nearest1d", |storage, layout, compute_dtype| {
-        let (b, c, src_sz) = layout.shape().dims3()?;
-        let dst_numel = b * c * dst_sz;
-        let out_shape = Shape::from((b, c, dst_sz));
-        let device = storage.device();
-        let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
-        let out_layout = Layout::contiguous(&out_shape);
-        let scale = src_sz as f32 / dst_sz as f32;
-        let uniforms = UpsampleNearest1dUniforms {
-            dst_sz: dst_sz as u32,
-            scale_bits: scale.to_bits(),
-            dst_numel: dst_numel as u32,
-            _align: 0,
-            src_layout: TensorLayoutUniform::from_layout(layout),
-            _pad: [0; 48],
-        };
-        let entry = format!("upsample_nearest1d_{}", float_type_suffix(compute_dtype));
-        let kernel =
-            compile_standard_kernel(device, upsample_nearest1d_shader(compute_dtype), &entry)?;
-        let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
-            device.device(),
-            device.queue(),
-            buffer_offset(&out, &out_layout),
-            buffer_offset(storage, layout),
-            None,
-            uniforms.as_bytes(),
-        )?;
-        let grid = workgroup_count(device, dst_numel);
-        storage
-            .backing()
-            .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
-            .map_err(Error::from)?;
-        Ok(out)
-    })
+    with_compute_dtype(
+        storage,
+        layout,
+        &out_shape,
+        "upsample_nearest1d",
+        |storage, layout, compute_dtype| {
+            let (b, c, src_sz) = layout.shape().dims3()?;
+            let dst_numel = b * c * dst_sz;
+            let out_shape = Shape::from((b, c, dst_sz));
+            let device = storage.device();
+            let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
+            let out_layout = Layout::contiguous(&out_shape);
+            let scale = src_sz as f32 / dst_sz as f32;
+            let uniforms = UpsampleNearest1dUniforms {
+                dst_sz: dst_sz as u32,
+                scale_bits: scale.to_bits(),
+                dst_numel: dst_numel as u32,
+                _align: 0,
+                src_layout: TensorLayoutUniform::from_layout(layout),
+                _pad: [0; 48],
+            };
+            let entry = format!("upsample_nearest1d_{}", float_type_suffix(compute_dtype));
+            let kernel =
+                compile_standard_kernel(device, upsample_nearest1d_shader(compute_dtype), &entry)?;
+            let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
+                device.device(),
+                device.queue(),
+                buffer_offset(&out, &out_layout),
+                buffer_offset(storage, layout),
+                None,
+                uniforms.as_bytes(),
+            )?;
+            let grid = workgroup_count(device, dst_numel);
+            storage
+                .backing()
+                .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
+                .map_err(Error::from)?;
+            Ok(out)
+        },
+    )
 }
 
 pub fn upsample_nearest2d(
@@ -639,41 +690,47 @@ pub fn upsample_nearest2d(
 ) -> CandleResult<WgpuStorage> {
     let (b, c, _, _) = layout.shape().dims4()?;
     let out_shape = Shape::from((b, c, dst_h, dst_w));
-    with_compute_dtype(storage, layout, &out_shape, "upsample_nearest2d", |storage, layout, compute_dtype| {
-        let (b, c, src_h, src_w) = layout.shape().dims4()?;
-        let dst_numel = b * c * dst_h * dst_w;
-        let out_shape = Shape::from((b, c, dst_h, dst_w));
-        let device = storage.device();
-        let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
-        let out_layout = Layout::contiguous(&out_shape);
-        let uniforms = UpsampleNearest2dUniforms {
-            dst_h: dst_h as u32,
-            dst_w: dst_w as u32,
-            scale_h_bits: (src_h as f32 / dst_h as f32).to_bits(),
-            scale_w_bits: (src_w as f32 / dst_w as f32).to_bits(),
-            dst_numel: dst_numel as u32,
-            _align: [0; 3],
-            src_layout: TensorLayoutUniform::from_layout(layout),
-            _pad: [0; 44],
-        };
-        let entry = format!("upsample_nearest2d_{}", float_type_suffix(compute_dtype));
-        let kernel =
-            compile_standard_kernel(device, upsample_nearest2d_shader(compute_dtype), &entry)?;
-        let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
-            device.device(),
-            device.queue(),
-            buffer_offset(&out, &out_layout),
-            buffer_offset(storage, layout),
-            None,
-            uniforms.as_bytes(),
-        )?;
-        let grid = workgroup_count(device, dst_numel);
-        storage
-            .backing()
-            .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
-            .map_err(Error::from)?;
-        Ok(out)
-    })
+    with_compute_dtype(
+        storage,
+        layout,
+        &out_shape,
+        "upsample_nearest2d",
+        |storage, layout, compute_dtype| {
+            let (b, c, src_h, src_w) = layout.shape().dims4()?;
+            let dst_numel = b * c * dst_h * dst_w;
+            let out_shape = Shape::from((b, c, dst_h, dst_w));
+            let device = storage.device();
+            let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
+            let out_layout = Layout::contiguous(&out_shape);
+            let uniforms = UpsampleNearest2dUniforms {
+                dst_h: dst_h as u32,
+                dst_w: dst_w as u32,
+                scale_h_bits: (src_h as f32 / dst_h as f32).to_bits(),
+                scale_w_bits: (src_w as f32 / dst_w as f32).to_bits(),
+                dst_numel: dst_numel as u32,
+                _align: [0; 3],
+                src_layout: TensorLayoutUniform::from_layout(layout),
+                _pad: [0; 44],
+            };
+            let entry = format!("upsample_nearest2d_{}", float_type_suffix(compute_dtype));
+            let kernel =
+                compile_standard_kernel(device, upsample_nearest2d_shader(compute_dtype), &entry)?;
+            let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
+                device.device(),
+                device.queue(),
+                buffer_offset(&out, &out_layout),
+                buffer_offset(storage, layout),
+                None,
+                uniforms.as_bytes(),
+            )?;
+            let grid = workgroup_count(device, dst_numel);
+            storage
+                .backing()
+                .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
+                .map_err(Error::from)?;
+            Ok(out)
+        },
+    )
 }
 
 pub fn upsample_bilinear2d(
@@ -687,47 +744,47 @@ pub fn upsample_bilinear2d(
 ) -> CandleResult<WgpuStorage> {
     let (b, c, _, _) = layout.shape().dims4()?;
     let out_shape = Shape::from((b, c, dst_h, dst_w));
-    with_compute_dtype(storage, layout, &out_shape, "upsample_bilinear2d", |storage, layout, compute_dtype| {
-        let (b, c, _, _) = layout.shape().dims4()?;
-        let dst_numel = b * c * dst_h * dst_w;
-        let out_shape = Shape::from((b, c, dst_h, dst_w));
-        let device = storage.device();
-        let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
-        let out_layout = Layout::contiguous(&out_shape);
-        let uniforms = UpsampleBilinear2dUniforms {
-            dst_h: dst_h as u32,
-            dst_w: dst_w as u32,
-            align_corners: u32::from(align_corners),
-            has_scale_h: u32::from(scale_h.is_some()),
-            scale_h_bits: scale_h
-                .map(|s| s as f32)
-                .unwrap_or(0.0)
-                .to_bits(),
-            has_scale_w: u32::from(scale_w.is_some()),
-            scale_w_bits: scale_w
-                .map(|s| s as f32)
-                .unwrap_or(0.0)
-                .to_bits(),
-            dst_numel: dst_numel as u32,
-            src_layout: TensorLayoutUniform::from_layout(layout),
-            _pad: [0; 44],
-        };
-        let entry = format!("upsample_bilinear2d_{}", float_type_suffix(compute_dtype));
-        let kernel =
-            compile_standard_kernel(device, upsample_bilinear2d_shader(compute_dtype), &entry)?;
-        let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
-            device.device(),
-            device.queue(),
-            buffer_offset(&out, &out_layout),
-            buffer_offset(storage, layout),
-            None,
-            uniforms.as_bytes(),
-        )?;
-        let grid = workgroup_count(device, dst_numel);
-        storage
-            .backing()
-            .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
-            .map_err(Error::from)?;
-        Ok(out)
-    })
+    with_compute_dtype(
+        storage,
+        layout,
+        &out_shape,
+        "upsample_bilinear2d",
+        |storage, layout, compute_dtype| {
+            let (b, c, _, _) = layout.shape().dims4()?;
+            let dst_numel = b * c * dst_h * dst_w;
+            let out_shape = Shape::from((b, c, dst_h, dst_w));
+            let device = storage.device();
+            let out = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
+            let out_layout = Layout::contiguous(&out_shape);
+            let uniforms = UpsampleBilinear2dUniforms {
+                dst_h: dst_h as u32,
+                dst_w: dst_w as u32,
+                align_corners: u32::from(align_corners),
+                has_scale_h: u32::from(scale_h.is_some()),
+                scale_h_bits: scale_h.map(|s| s as f32).unwrap_or(0.0).to_bits(),
+                has_scale_w: u32::from(scale_w.is_some()),
+                scale_w_bits: scale_w.map(|s| s as f32).unwrap_or(0.0).to_bits(),
+                dst_numel: dst_numel as u32,
+                src_layout: TensorLayoutUniform::from_layout(layout),
+                _pad: [0; 44],
+            };
+            let entry = format!("upsample_bilinear2d_{}", float_type_suffix(compute_dtype));
+            let kernel =
+                compile_standard_kernel(device, upsample_bilinear2d_shader(compute_dtype), &entry)?;
+            let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
+                device.device(),
+                device.queue(),
+                buffer_offset(&out, &out_layout),
+                buffer_offset(storage, layout),
+                None,
+                uniforms.as_bytes(),
+            )?;
+            let grid = workgroup_count(device, dst_numel);
+            storage
+                .backing()
+                .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
+                .map_err(Error::from)?;
+            Ok(out)
+        },
+    )
 }

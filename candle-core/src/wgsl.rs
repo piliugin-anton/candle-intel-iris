@@ -41,6 +41,10 @@ pub const COPY_BF16: &str = concat!(
     include_str!("../wgsl/common_bf16.wgsl"),
     include_str!("../wgsl/copy_bf16.wgsl")
 );
+pub const COPY_U32: &str = concat!(
+    include_str!("../wgsl/common_u32.wgsl"),
+    include_str!("../wgsl/copy_u32.wgsl")
+);
 pub const REDUCE: &str = concat!(
     include_str!("../wgsl/reduce_common.wgsl"),
     include_str!("../wgsl/reduce.wgsl")
@@ -68,6 +72,10 @@ pub const MATMUL_TILED_VEC: &str = concat!(
 pub const MATMUL_TILED_F16: &str = concat!(
     include_str!("../wgsl/matmul_common_f16.wgsl"),
     include_str!("../wgsl/matmul_tiled_f16.wgsl")
+);
+pub const MATMUL_TILED_F16ACC: &str = concat!(
+    include_str!("../wgsl/matmul_common_f16acc.wgsl"),
+    include_str!("../wgsl/matmul_tiled_f16acc.wgsl")
 );
 pub const MATMUL_TILED_BF16: &str = concat!(
     include_str!("../wgsl/matmul_common_bf16.wgsl"),
@@ -229,6 +237,8 @@ mod tests {
         assert!(COPY.contains("fn copy_strided_f32"));
         assert!(COPY_F16.contains("fn copy_strided_f16"));
         assert!(COPY_BF16.contains("fn copy_strided_bf16"));
+        assert!(COPY_U32.contains("fn copy_strided_u32"));
+        assert!(CAST.contains("fn cast_f32_u32"));
         assert!(REDUCE.contains("fn reduce_sum_f32"));
         assert!(REDUCE_F16.contains("fn reduce_sum_f16"));
         assert!(REDUCE_BF16.contains("fn reduce_sum_bf16"));
@@ -238,6 +248,8 @@ mod tests {
         assert!(MATMUL_TILED_VEC.contains("fn matmul_tiled_vec_f32"));
         assert!(MATMUL_TILED_F16.contains("fn matmul_tiled_f16"));
         assert!(MATMUL_TILED_F16.contains("fn matmul_tiled_vec_f16"));
+        assert!(MATMUL_TILED_F16ACC.contains("fn matmul_tiled_f16acc"));
+        assert!(MATMUL_TILED_F16ACC.contains("fn matmul_tiled_vec_f16acc"));
         assert!(QMATMUL_Q4_0.contains("fn qmatmul_q4_0_f32"));
         assert!(QMATMUL_Q5_0.contains("fn qmatmul_q5_0_f32"));
         assert!(UNARY_F16.contains("fn gelu_f16"));

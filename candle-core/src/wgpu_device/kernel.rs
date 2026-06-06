@@ -3,10 +3,10 @@ use super::bind_group::{
     BindGroupBuilder, ExtendedBindGroupArgs, ExtendedBindGroupBuilder, KernelUniforms,
     SdpaBindGroupArgs, SdpaBindGroupBuilder, StandardBindGroupArgs, StandardBindGroupLayout,
 };
-use super::shader_cache::{EXTENDED_KERNEL_LAYOUT_KEY, SDPA_KERNEL_LAYOUT_KEY};
 use super::error::Result;
 use super::intel_caps::tune_shader_source;
 use super::shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
+use super::shader_cache::{EXTENDED_KERNEL_LAYOUT_KEY, SDPA_KERNEL_LAYOUT_KEY};
 use super::storage::BufferOffset;
 use super::WgpuDevice;
 use crate::Layout;
@@ -172,10 +172,7 @@ impl WgpuKernel {
     }
 
     /// Builds a kernel handle for random-number shaders (custom bind group layout).
-    pub fn from_random_pipeline(
-        pipeline: wgpu::ComputePipeline,
-        workgroup_size: u32,
-    ) -> Self {
+    pub fn from_random_pipeline(pipeline: wgpu::ComputePipeline, workgroup_size: u32) -> Self {
         Self {
             pipeline,
             bind_group_builder: BindGroupBuilder::new(),

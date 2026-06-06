@@ -6,10 +6,10 @@ mod allocator;
 mod async_io;
 mod bind_group;
 mod conv;
+mod error;
 mod fallback;
 mod fill;
 mod indexing;
-mod error;
 mod intel_caps;
 mod kernel;
 mod mapped_buffer;
@@ -28,39 +28,35 @@ pub use crate::wgsl::{
 };
 pub use adapter::{is_intel_adapter, WgpuDeviceConfig, INTEL_VENDOR_ID};
 pub use allocator::Allocator;
+pub use async_io::wait_for_buffer_map;
 pub use bind_group::{
     BindGroupBuilder, ExtendedBindGroupArgs, ExtendedBindGroupBuilder, ExtendedBindGroupLayout,
     KernelUniforms, StandardBindGroupArgs, StandardBindGroupLayout, TensorLayoutUniform,
     MAX_TENSOR_DIMS,
 };
 pub use error::{Result, WgpuError};
+pub use fallback::{
+    cpu_fallback_inplace_op1, cpu_fallback_inplace_op2, cpu_fallback_inplace_op3, cpu_fallback_op1,
+    cpu_fallback_op2, cpu_fallback_op3,
+};
 pub use intel_caps::{
     detect_generation, inject_workgroup_size, tune_matmul_shader_source, tune_shader_source,
     IntelCaps, IntelGeneration, DEFAULT_UMA_AUTO_MAP_THRESHOLD,
 };
 pub use kernel::{KernelDispatchArgs, WgpuKernel};
 pub use mapped_buffer::{MappedBacking, MAPPED_READ_USAGE};
-pub use shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
-pub use async_io::wait_for_buffer_map;
-pub use fallback::{
-    cpu_fallback_inplace_op1, cpu_fallback_inplace_op2, cpu_fallback_inplace_op3,
-    cpu_fallback_op1, cpu_fallback_op2, cpu_fallback_op3,
-};
 pub use ops::{
     dispatch_copy2d, dispatch_copy_strided_src, dispatch_dequant_f32, dispatch_layer_norm,
     dispatch_layer_norm_f32, dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k, dispatch_qmatmul_q5_0,
     dispatch_qmatmul_q8_0, dispatch_quant_f32, dispatch_rms_norm, dispatch_rms_norm_f32,
-    dispatch_rope, dispatch_rope_f32, dispatch_rope_i, dispatch_rope_thd, dispatch_sigmoid,
-    dispatch_sdpa,
+    dispatch_rope, dispatch_rope_f32, dispatch_rope_i, dispatch_rope_thd, dispatch_sdpa,
     dispatch_sdpa_f32, dispatch_sdpa_full, dispatch_sdpa_full_f32, dispatch_sdpa_vector,
-    dispatch_sdpa_vector_f32, dispatch_softmax_last_dim, dispatch_softmax_last_dim_f32,
-    gpu_dequant_supported,
-    gpu_quant_supported, Copy2dParams, dispatch_where_u8_f32, upload_q4_0_weights,
-    upload_quant_weights, MAX_SDPA_DIM,
+    dispatch_sdpa_vector_f32, dispatch_sigmoid, dispatch_softmax_last_dim,
+    dispatch_softmax_last_dim_f32, dispatch_where_u8_f32, gpu_dequant_supported,
+    gpu_quant_supported, upload_q4_0_weights, upload_quant_weights, Copy2dParams, MAX_SDPA_DIM,
 };
-pub use sort::{
-    dispatch_arg_sort_last_dim, gpu_argsort_supported, MAX_ARGSORT_NCOLS_PAD,
-};
+pub use shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
+pub use sort::{dispatch_arg_sort_last_dim, gpu_argsort_supported, MAX_ARGSORT_NCOLS_PAD};
 pub use storage::{buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
 
 use crate::backend::BackendDevice;

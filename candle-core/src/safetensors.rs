@@ -113,7 +113,11 @@ impl Tensor {
 }
 
 #[cfg(feature = "wgpu")]
-fn convert_slice_wgpu<T: WithDType>(data: &[u8], shape: &[usize], device: &crate::WgpuDevice) -> Result<Tensor> {
+fn convert_slice_wgpu<T: WithDType>(
+    data: &[u8],
+    shape: &[usize],
+    device: &crate::WgpuDevice,
+) -> Result<Tensor> {
     use crate::storage::Storage;
     use crate::wgpu_device::WgpuStorage;
 

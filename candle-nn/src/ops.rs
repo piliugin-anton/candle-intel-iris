@@ -1306,8 +1306,18 @@ impl candle::CustomOp3 for Sdpa {
         if q_l.dim(D::Minus(3))? % k_l.dim(D::Minus(3))? != 0 {
             candle::bail!("query `n_heads` must be a multiple of `n_kv_heads`");
         }
-        if q_head != 64 && q_head != 128 {
-            candle::bail!("wgpu sdpa supports head_dim 64 or 128, got {q_head}");
+        let v_dim = v_l.dim(D::Minus1)?;
+        if q_head > candle::wgpu_device::MAX_SDPA_DIM {
+            candle::bail!(
+                "wgpu sdpa supports head_dim <= {}, got {q_head}",
+                candle::wgpu_device::MAX_SDPA_DIM
+            );
+        }
+        if v_dim > candle::wgpu_device::MAX_SDPA_DIM {
+            candle::bail!(
+                "wgpu sdpa supports v_dim <= {}, got {v_dim}",
+                candle::wgpu_device::MAX_SDPA_DIM
+            );
         }
         if q_seq > k_seq {
             candle::bail!("wgpu sdpa requires q_seq <= k_seq");

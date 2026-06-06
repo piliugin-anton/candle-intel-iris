@@ -285,9 +285,7 @@ impl QStorage {
             QStorage::Metal(storage) => Ok(Storage::Metal(storage.dequantize(elem_count)?)),
             QStorage::Cuda(storage) => Ok(Storage::Cuda(storage.dequantize(elem_count)?)),
             #[cfg(feature = "wgpu")]
-            QStorage::Wgpu(storage) => {
-                Ok(Storage::Wgpu(Box::new(storage.dequantize(elem_count)?)))
-            }
+            QStorage::Wgpu(storage) => Ok(Storage::Wgpu(Box::new(storage.dequantize(elem_count)?))),
         }
     }
 

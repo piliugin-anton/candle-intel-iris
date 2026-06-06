@@ -472,19 +472,18 @@ fn attn(qkv: &Qkv, num_heads: usize, use_flash_attn: bool) -> Result<Tensor> {
 
     let headdim = qkv.q.dim(D::Minus1)?;
     let softmax_scale = 1.0 / (headdim as f64).sqrt();
-    let attn = if use_flash_attn
-        && crate::attention::fused_attention_available(qkv.q.device(), headdim)
-    {
-        crate::attention::fused_attention_bsnd(
-            &qkv.q,
-            &qkv.k,
-            &qkv.v,
-            softmax_scale as f32,
-            false,
-            None,
-        )?
-    } else {
-        flash_compatible_attention(&qkv.q, &qkv.k, &qkv.v, softmax_scale as f32)?
-    };
+    let attn =
+        if use_flash_attn && crate::attention::fused_attention_available(qkv.q.device(), headdim) {
+            crate::attention::fused_attention_bsnd(
+                &qkv.q,
+                &qkv.k,
+                &qkv.v,
+                softmax_scale as f32,
+                false,
+                None,
+            )?
+        } else {
+            flash_compatible_attention(&qkv.q, &qkv.k, &qkv.v, softmax_scale as f32)?
+        };
     attn.reshape((batch_size, seqlen, ()))
 }
