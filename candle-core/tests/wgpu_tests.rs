@@ -274,6 +274,46 @@ fn parity_elemwise_128() -> Result<()> {
 
 #[test]
 #[ignore = "requires GPU with wgpu backend"]
+fn parity_unary_trig_erf_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+
+    let xs_cpu = Tensor::from_vec(
+        vec![-1.0f32, -0.5, 0.0, 0.5, 1.0, 2.0],
+        (2, 3),
+        &cpu,
+    )?;
+    let xs_gpu = xs_cpu.to_device(&gpu)?;
+
+    assert_parity(&xs_cpu.sin()?, &xs_gpu.sin()?)?;
+    assert_parity(&xs_cpu.cos()?, &xs_gpu.cos()?)?;
+    assert_parity(&xs_cpu.tanh()?, &xs_gpu.tanh()?)?;
+    assert_parity(&xs_cpu.sqr()?, &xs_gpu.sqr()?)?;
+    assert_parity(&xs_cpu.erf()?, &xs_gpu.erf()?)?;
+    assert_parity(&xs_cpu.gelu_erf()?, &xs_gpu.gelu_erf()?)?;
+    assert_parity(&xs_cpu.sign()?, &xs_gpu.sign()?)?;
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_argmin_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+
+    let xs_cpu = Tensor::from_vec(vec![3.0f32, 1.0, 4.0, 1.0, 5.0, 9.0], (2, 3), &cpu)?;
+    let xs_gpu = xs_cpu.to_device(&gpu)?;
+    assert_eq!(
+        xs_cpu.argmin(1)?.to_vec1::<u32>()?,
+        xs_gpu.argmin(1)?.to_vec1::<u32>()?,
+    );
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
 fn parity_gelu_affine_reduce_min_f32() -> Result<()> {
     let gpu = wgpu_device()?;
     let cpu = Device::Cpu;

@@ -169,8 +169,19 @@ fn unary_entry_point(kernel: &str) -> Option<&'static str> {
         "urelu" => Some("relu_f32"),
         "urecip" => Some("recip_f32"),
         "usilu" => Some("silu_f32"),
+        "usigmoid" => Some("sigmoid_f32"),
         "ugelu" => Some("gelu_f32"),
+        "ugelu_erf" => Some("gelu_erf_f32"),
         "uabs" => Some("abs_f32"),
+        "usin" => Some("sin_f32"),
+        "ucos" => Some("cos_f32"),
+        "utanh" => Some("tanh_f32"),
+        "usqr" => Some("sqr_f32"),
+        "uerf" => Some("erf_f32"),
+        "uceil" => Some("ceil_f32"),
+        "ufloor" => Some("floor_f32"),
+        "uround" => Some("round_f32"),
+        "usign" => Some("sign_f32"),
         _ => None,
     }
 }
@@ -193,7 +204,7 @@ fn reduce_entry_point(op: ReduceOp) -> Option<&'static str> {
         ReduceOp::Max => Some("reduce_max_f32"),
         ReduceOp::Min => Some("reduce_min_f32"),
         ReduceOp::ArgMax => Some("reduce_argmax_f32"),
-        ReduceOp::ArgMin => None,
+        ReduceOp::ArgMin => Some("reduce_argmin_f32"),
     }
 }
 
@@ -547,15 +558,13 @@ pub fn dispatch_reduce(
 ) -> CandleResult<WgpuStorage> {
     require_f32(storage.dtype(), "reduce")?;
 
-    if matches!(op, ReduceOp::ArgMin) {
-        return Err(
-            WgpuError::Message(format!("wgpu reduce op {:?} not yet implemented", op)).into(),
-        );
-    }
-
-    if matches!(op, ReduceOp::ArgMax) && reduce_dims.len() != 1 {
+    if matches!(op, ReduceOp::ArgMax | ReduceOp::ArgMin) && reduce_dims.len() != 1 {
         return Err(Error::OnlySingleDimension {
-            op: "argmax",
+            op: if matches!(op, ReduceOp::ArgMax) {
+                "argmax"
+            } else {
+                "argmin"
+            },
             dims: reduce_dims.to_vec(),
         }
         .bt());
@@ -574,8 +583,10 @@ pub fn dispatch_reduce(
 
     let src_elem_count = layout.shape().elem_count();
     let dst_elem_count = dst_shape.elem_count();
+    let arg_index = matches!(op, ReduceOp::ArgMax | ReduceOp::ArgMin);
     if dst_elem_count == 0 {
-        return WgpuStorage::alloc(storage.device(), &dst_shape, DType::F32).map_err(Error::from);
+        let dtype = if arg_index { DType::U32 } else { DType::F32 };
+        return WgpuStorage::alloc(storage.device(), &dst_shape, dtype).map_err(Error::from);
     }
     let reduce_chunk_size = src_elem_count / dst_elem_count;
 
@@ -609,7 +620,20 @@ pub fn dispatch_reduce(
             kernel.dispatch_bind_group(&device, &bind_group, [dst_elem_count as u32, 1, 1])
         })
         .map_err(Error::from)?;
+    if arg_index {
+        return arg_index_f32_to_u32(out);
+    }
     Ok(out)
+}
+
+/// Argmax/argmin kernels write indices as f32; Candle expects `U32` storage.
+fn arg_index_f32_to_u32(out_f32: WgpuStorage) -> CandleResult<WgpuStorage> {
+    let cpu = out_f32.to_cpu_storage()?;
+    let CpuStorage::F32(indices) = cpu else {
+        return Err(Error::Msg("expected f32 arg index buffer".into()));
+    };
+    let indices: Vec<u32> = indices.iter().map(|&v| v as u32).collect();
+    WgpuStorage::from_cpu(out_f32.device(), &CpuStorage::U32(indices)).map_err(Error::from)
 }
 
 fn compile_copy_kernel(device: &WgpuDevice, source: &str, entry: &str) -> Result<WgpuKernel> {
@@ -833,7 +857,15 @@ mod tests {
     #[test]
     fn unary_entry_points() {
         assert_eq!(unary_entry_point("uexp"), Some("exp_f32"));
-        assert_eq!(unary_entry_point("usin"), None);
+        assert_eq!(unary_entry_point("usin"), Some("sin_f32"));
+        assert_eq!(unary_entry_point("ucos"), Some("cos_f32"));
+        assert_eq!(unary_entry_point("utanh"), Some("tanh_f32"));
+        assert_eq!(unary_entry_point("usqr"), Some("sqr_f32"));
+        assert_eq!(unary_entry_point("uerf"), Some("erf_f32"));
+        assert_eq!(unary_entry_point("ugelu_erf"), Some("gelu_erf_f32"));
+        assert_eq!(unary_entry_point("usigmoid"), Some("sigmoid_f32"));
+        assert_eq!(unary_entry_point("usign"), Some("sign_f32"));
+        assert_eq!(unary_entry_point("unknown"), None);
     }
 
     #[test]
@@ -855,6 +887,8 @@ mod tests {
         assert_eq!(reduce_entry_point(ReduceOp::Max), Some("reduce_max_f32"));
         assert_eq!(unary_entry_point("ugelu"), Some("gelu_f32"));
         assert_eq!(reduce_entry_point(ReduceOp::Min), Some("reduce_min_f32"));
+        assert_eq!(reduce_entry_point(ReduceOp::ArgMax), Some("reduce_argmax_f32"));
+        assert_eq!(reduce_entry_point(ReduceOp::ArgMin), Some("reduce_argmin_f32"));
     }
 
     #[test]
