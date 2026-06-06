@@ -32,7 +32,7 @@ use candle_core::wgpu_device::{
     dispatch_dequant_f32, dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k, dispatch_qmatmul_q5_0,
     dispatch_qmatmul_q8_0, upload_quant_weights,
 };
-use candle_core::{backend::BackendStorage, Device, DType, Module, Result, Storage, Tensor};
+use candle_core::{backend::BackendStorage, Device, DType, IndexOp, Module, Result, Storage, Tensor};
 
 const EPS: f32 = 1e-4;
 const BF16_EPS: f32 = 0.03;
@@ -1041,5 +1041,133 @@ fn parity_conv_transpose2d_f32() -> Result<()> {
         .to_device(&gpu)?
         .conv_transpose2d(&w.to_device(&gpu)?, 0, 0, 1, 1)?;
     assert_parity(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_index_select_f32_u32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let ids = Tensor::new(&[0u32, 2u32, 1u32], &cpu)?;
+    let t = Tensor::arange(0f32, 12f32, &cpu)?.reshape((4, 3))?;
+    let out_cpu = t.index_select(&ids, 0)?;
+    let out_gpu = t.to_device(&gpu)?.index_select(&ids.to_device(&gpu)?, 0)?;
+    assert_parity(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_gather_f32_u32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let t = Tensor::arange(0f32, 12f32, &cpu)?.reshape((4, 3))?;
+    let ids = Tensor::new(&[0u32, 2u32, 1u32, 0u32], &cpu)?.reshape((2, 2))?;
+    let out_cpu = t.gather(&ids, 0)?;
+    let out_gpu = t.to_device(&gpu)?.gather(&ids.to_device(&gpu)?, 0)?;
+    assert_parity(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_index_add_f32_u32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let ids = Tensor::new(&[0u32, 1u32, 1u32], &cpu)?;
+    let t = Tensor::arange(0f32, 12f32, &cpu)?.reshape((4, 3))?;
+    let init = Tensor::ones((4, 2), DType::F32, &cpu)?;
+    let out_cpu = init.index_add(&ids, &t, 1)?;
+    let out_gpu = init
+        .to_device(&gpu)?
+        .index_add(&ids.to_device(&gpu)?, &t.to_device(&gpu)?, 1)?;
+    assert_parity(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_const_set_u32_strided() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let tensor_cpu = Tensor::zeros((3, 4), DType::U32, &cpu)?;
+    tensor_cpu.const_set(42u32.into())?;
+    let tensor_gpu = Tensor::zeros((3, 4), DType::U32, &gpu)?;
+    tensor_gpu.const_set(42u32.into())?;
+    assert_eq!(
+        tensor_cpu.to_vec2::<u32>()?,
+        tensor_gpu.to_vec2::<u32>()?
+    );
+    tensor_cpu.i((.., 2))?.const_set(1337u32.into())?;
+    tensor_gpu.i((.., 2))?.const_set(1337u32.into())?;
+    assert_eq!(
+        tensor_cpu.to_vec2::<u32>()?,
+        tensor_gpu.to_vec2::<u32>()?
+    );
+    tensor_cpu.i((2, ..))?.const_set(1u32.into())?;
+    tensor_gpu.i((2, ..))?.const_set(1u32.into())?;
+    assert_eq!(
+        tensor_cpu.to_vec2::<u32>()?,
+        tensor_gpu.to_vec2::<u32>()?
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_cmp_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let t1 = Tensor::new(&[[0f32, 1f32], [2f32, 3f32], [4f32, 5f32]], &cpu)?;
+    let t2 = Tensor::new(&[[1f32, 0f32], [3f32, 3f32], [4f32, 7f32]], &cpu)?;
+    let g1 = t1.to_device(&gpu)?;
+    let g2 = t2.to_device(&gpu)?;
+    assert_eq!(t1.eq(&t2)?.to_vec2::<u8>()?, g1.eq(&g2)?.to_vec2::<u8>()?);
+    assert_eq!(t1.ne(&t2)?.to_vec2::<u8>()?, g1.ne(&g2)?.to_vec2::<u8>()?);
+    assert_eq!(t1.le(&t2)?.to_vec2::<u8>()?, g1.le(&g2)?.to_vec2::<u8>()?);
+    assert_eq!(t1.lt(&t2)?.to_vec2::<u8>()?, g1.lt(&g2)?.to_vec2::<u8>()?);
+    assert_eq!(t1.gt(&t2)?.to_vec2::<u8>()?, g1.gt(&g2)?.to_vec2::<u8>()?);
+    assert_eq!(t1.ge(&t2)?.to_vec2::<u8>()?, g1.ge(&g2)?.to_vec2::<u8>()?);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_powf_elu_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let t = Tensor::new(&[-1.5f32, 0.0, 1.5, 2.0], &cpu)?;
+    let cpu_pow = t.powf(2.0)?;
+    let gpu_pow = t.to_device(&gpu)?.powf(2.0)?;
+    assert_parity(&cpu_pow, &gpu_pow)?;
+    let cpu_elu = t.elu(1.1)?;
+    let gpu_elu = t.to_device(&gpu)?.elu(1.1)?;
+    assert_parity(&cpu_elu, &gpu_elu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_rand_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    gpu.set_seed(42)?;
+    let t1 = Tensor::rand(0f32, 1f32, (5, 3), &gpu)?;
+    let t2 = Tensor::rand(0f32, 1f32, (5, 3), &gpu)?;
+    assert_ne!(t1.to_vec2::<f32>()?, t2.to_vec2::<f32>()?);
+    assert_eq!(t1.dims(), [5, 3]);
+
+    let n1 = Tensor::randn(0f32, 1f32, (5, 3), &gpu)?;
+    let n2 = Tensor::randn(0f32, 1f32, (5, 3), &gpu)?;
+    assert_ne!(n1.to_vec2::<f32>()?, n2.to_vec2::<f32>()?);
+
+    const N: usize = 2;
+    let v = (0..100)
+        .map(|_| Tensor::randn(0f32, 1f32, N, &gpu).and_then(|t| t.to_vec1::<f32>()))
+        .collect::<Result<Vec<_>>>()?;
+    assert!(
+        (0..N).all(|i| v.windows(2).any(|pair| pair[0][i] != pair[1][i])),
+        "deterministic randn values detected"
+    );
     Ok(())
 }

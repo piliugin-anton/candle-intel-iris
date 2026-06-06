@@ -92,6 +92,11 @@ pub struct MappedBacking {
     read_staging: MappedStaging,
 }
 
+fn aligned_copy_size(size: usize) -> usize {
+    let align = wgpu::COPY_BUFFER_ALIGNMENT as usize;
+    size.div_ceil(align) * align
+}
+
 impl MappedBacking {
     pub fn new(device: &WgpuDevice, byte_len: usize) -> Result<Self> {
         let storage_usage = BufferUsages::STORAGE
@@ -100,7 +105,7 @@ impl MappedBacking {
         let storage = device.allocate_buffer(byte_len, storage_usage)?;
         let staging = device.allocator().allocate_mapped(
             device.device(),
-            byte_len,
+            aligned_copy_size(byte_len),
             MAPPED_READ_USAGE,
             false,
         )?;
@@ -117,12 +122,16 @@ impl MappedBacking {
     pub fn read_bytes(&self, device: &WgpuDevice, size: u64) -> Result<Vec<u8>> {
         let wgpu_device = device.device();
         let queue = device.queue();
+        let align = wgpu::COPY_BUFFER_ALIGNMENT;
+        let copy_size = size.div_ceil(align) * align;
         let mut encoder = wgpu_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("wgpu mapped readback"),
         });
-        encoder.copy_buffer_to_buffer(&self.storage, 0, self.read_staging.buffer(), 0, size);
+        encoder.copy_buffer_to_buffer(&self.storage, 0, self.read_staging.buffer(), 0, copy_size);
         queue.submit(Some(encoder.finish()));
-        self.read_staging.read_bytes(wgpu_device, size)
+        let mut bytes = self.read_staging.read_bytes(wgpu_device, copy_size)?;
+        bytes.truncate(size as usize);
+        Ok(bytes)
     }
 
     pub fn with_unmapped<R>(&self, f: impl FnOnce() -> Result<R>) -> Result<R> {

@@ -106,6 +106,13 @@ impl KernelUniforms {
         }
     }
 
+    /// Uniform block for `const_set_*`: `_pad0[0]` holds the scalar bit pattern.
+    pub fn new_const_set(elem_count: usize, layout: &Layout, value_bits: u32) -> Self {
+        let mut uniforms = Self::new(elem_count, layout, layout, None);
+        uniforms._pad0[0] = value_bits;
+        uniforms
+    }
+
     /// Uniform block for `affine_f32`: `_pad0[0]` / `_pad0[1]` are f32 `mul` / `add` bit patterns.
     pub fn new_affine(
         elem_count: usize,
@@ -117,6 +124,18 @@ impl KernelUniforms {
         let mut uniforms = Self::new(elem_count, out_layout, in0_layout, None);
         uniforms._pad0[0] = (mul as f32).to_bits();
         uniforms._pad0[1] = (add as f32).to_bits();
+        uniforms
+    }
+
+    /// Uniform block for unary ops with one f32 parameter in `_pad0[0]`.
+    pub fn new_unary_f32(
+        elem_count: usize,
+        out_layout: &Layout,
+        in0_layout: &Layout,
+        value: f64,
+    ) -> Self {
+        let mut uniforms = Self::new(elem_count, out_layout, in0_layout, None);
+        uniforms._pad0[0] = (value as f32).to_bits();
         uniforms
     }
 
@@ -915,6 +934,15 @@ fixed_uniform!(RopeUniforms {
 } pad 67);
 
 fixed_uniform!(WhereUniforms { elem_count: u32 } pad 71);
+
+fixed_uniform!(IndexingUniforms {
+    elem_count: u32,
+    left_size: u32,
+    src_dim_size: u32,
+    dim_size: u32,
+    right_size: u32,
+    ids_dim_size: u32,
+} pad 66);
 
 fixed_uniform!(SoftmaxUniforms {
     n_rows: u32,

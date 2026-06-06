@@ -264,9 +264,12 @@ fn read_bytes_staging(device: &WgpuDevice, src: &wgpu::Buffer, size: u64) -> Res
     let wgpu_device = device.device();
     let queue = device.queue();
 
+    let align = wgpu::COPY_BUFFER_ALIGNMENT;
+    let copy_size = size.div_ceil(align) * align;
+
     let staging = wgpu_device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("wgpu readback staging"),
-        size,
+        size: copy_size,
         usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -274,7 +277,7 @@ fn read_bytes_staging(device: &WgpuDevice, src: &wgpu::Buffer, size: u64) -> Res
     let mut encoder = wgpu_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wgpu readback"),
     });
-    encoder.copy_buffer_to_buffer(src, 0, &staging, 0, size);
+    encoder.copy_buffer_to_buffer(src, 0, &staging, 0, copy_size);
     queue.submit(Some(encoder.finish()));
 
     let slice = staging.slice(..);
@@ -286,9 +289,10 @@ fn read_bytes_staging(device: &WgpuDevice, src: &wgpu::Buffer, size: u64) -> Res
     wait_for_buffer_map(wgpu_device, &rx)?;
 
     let mapped = slice.get_mapped_range();
-    let bytes = mapped.to_vec();
+    let mut bytes = mapped.to_vec();
     drop(mapped);
     staging.unmap();
+    bytes.truncate(size as usize);
     Ok(bytes)
 }
 
@@ -377,23 +381,6 @@ fn bytemuck_slice<T>(data: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), std::mem::size_of_val(data)) }
 }
 
-/// Returns a Candle `Error::Msg` for an unimplemented wgpu backend op.
-///
-/// # Examples
-///
-/// ```ignore
-/// wgpu_not_impl!("conv1d")
-/// // => Err(Error::Msg("wgpu backend: conv1d not yet implemented"))
-/// ```
-macro_rules! wgpu_not_impl {
-    ($name:expr) => {
-        Err(Error::Msg(format!(
-            "wgpu backend: {} not yet implemented",
-            $name
-        )))
-    };
-}
-
 impl BackendStorage for WgpuStorage {
     type Device = WgpuDevice;
 
@@ -441,12 +428,12 @@ impl BackendStorage for WgpuStorage {
         ops::dispatch_affine(self, layout, mul, add)
     }
 
-    fn powf(&self, _: &Layout, _: f64) -> CandleResult<Self> {
-        wgpu_not_impl!("powf")
+    fn powf(&self, layout: &Layout, exp: f64) -> CandleResult<Self> {
+        ops::dispatch_powf(self, layout, exp)
     }
 
-    fn elu(&self, _: &Layout, _: f64) -> CandleResult<Self> {
-        wgpu_not_impl!("elu")
+    fn elu(&self, layout: &Layout, alpha: f64) -> CandleResult<Self> {
+        ops::dispatch_elu(self, layout, alpha)
     }
 
     fn reduce_op(
@@ -458,8 +445,14 @@ impl BackendStorage for WgpuStorage {
         ops::dispatch_reduce(self, op, layout, reduce_dims)
     }
 
-    fn cmp(&self, _: CmpOp, _: &Self, _: &Layout, _: &Layout) -> CandleResult<Self> {
-        wgpu_not_impl!("cmp")
+    fn cmp(
+        &self,
+        op: CmpOp,
+        rhs: &Self,
+        lhs_layout: &Layout,
+        rhs_layout: &Layout,
+    ) -> CandleResult<Self> {
+        ops::dispatch_cmp(self, rhs, lhs_layout, rhs_layout, op)
     }
 
     fn unary_impl<B: UnaryOpT>(&self, layout: &Layout) -> CandleResult<Self> {
@@ -573,48 +566,60 @@ impl BackendStorage for WgpuStorage {
         )
     }
 
-    fn gather(&self, _: &Layout, _: &Self, _: &Layout, _: usize) -> CandleResult<Self> {
-        wgpu_not_impl!("gather")
+    fn gather(
+        &self,
+        layout: &Layout,
+        ids: &Self,
+        ids_l: &Layout,
+        dim: usize,
+    ) -> CandleResult<Self> {
+        super::indexing::dispatch_gather_f32(self, layout, ids, ids_l, dim)
     }
 
     fn scatter_set(
         &mut self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: usize,
+        layout: &Layout,
+        ids: &Self,
+        ids_l: &Layout,
+        src: &Self,
+        src_l: &Layout,
+        dim: usize,
     ) -> CandleResult<()> {
-        wgpu_not_impl!("scatter_set")
+        super::indexing::dispatch_scatter_f32(self, layout, ids, ids_l, src, src_l, dim, false)
     }
 
     fn scatter_add_set(
         &mut self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: usize,
+        layout: &Layout,
+        ids: &Self,
+        ids_l: &Layout,
+        src: &Self,
+        src_l: &Layout,
+        dim: usize,
     ) -> CandleResult<()> {
-        wgpu_not_impl!("scatter_add_set")
+        super::indexing::dispatch_scatter_f32(self, layout, ids, ids_l, src, src_l, dim, true)
     }
 
-    fn index_select(&self, _: &Self, _: &Layout, _: &Layout, _: usize) -> CandleResult<Self> {
-        wgpu_not_impl!("index_select")
+    fn index_select(
+        &self,
+        ids: &Self,
+        layout: &Layout,
+        ids_l: &Layout,
+        dim: usize,
+    ) -> CandleResult<Self> {
+        super::indexing::dispatch_index_select_f32(self, layout, ids, ids_l, dim)
     }
 
     fn index_add(
         &self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: usize,
+        layout: &Layout,
+        ids: &Self,
+        ids_l: &Layout,
+        src: &Self,
+        src_l: &Layout,
+        dim: usize,
     ) -> CandleResult<Self> {
-        wgpu_not_impl!("index_add")
+        super::indexing::dispatch_index_add_f32(self, layout, ids, ids_l, src, src_l, dim)
     }
 
     fn matmul(
@@ -656,8 +661,8 @@ impl BackendStorage for WgpuStorage {
         .map_err(Error::from)
     }
 
-    fn const_set(&mut self, _: crate::scalar::Scalar, _: &Layout) -> CandleResult<()> {
-        wgpu_not_impl!("const_set")
+    fn const_set(&mut self, scalar: crate::scalar::Scalar, layout: &Layout) -> CandleResult<()> {
+        super::fill::dispatch_const_set(self, layout, scalar)
     }
 }
 

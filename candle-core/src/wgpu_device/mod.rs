@@ -3,11 +3,14 @@ mod allocator;
 mod async_io;
 mod bind_group;
 mod conv;
+mod fill;
+mod indexing;
 mod error;
 mod intel_caps;
 mod kernel;
 mod mapped_buffer;
 mod ops;
+mod rng;
 mod shader_cache;
 mod storage;
 
@@ -46,6 +49,7 @@ pub use storage::{buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORA
 use crate::backend::BackendDevice;
 use crate::{CpuStorage, DType, Error, Result as CandleResult, Shape};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 /// Unique identifier for wgpu device handles (distinct from the PCI device id).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -68,6 +72,8 @@ pub struct WgpuDevice {
     caps: IntelCaps,
     shader_cache: ShaderCache,
     allocator: Allocator,
+    rng_seed: Arc<RwLock<u64>>,
+    random_layout: rng::RandomBindGroupLayout,
 }
 
 impl WgpuDevice {
@@ -92,7 +98,17 @@ impl WgpuDevice {
             caps: IntelCaps::default_fallback(),
             shader_cache: ShaderCache::new(),
             allocator: Allocator::new(),
+            rng_seed: Arc::new(RwLock::new(rng::DEFAULT_RNG_SEED)),
+            random_layout: rng::RandomBindGroupLayout::new(),
         }
+    }
+
+    pub(crate) fn rng_seed(&self) -> &Arc<RwLock<u64>> {
+        &self.rng_seed
+    }
+
+    pub(crate) fn random_bind_group_layout(&self) -> &rng::RandomBindGroupLayout {
+        &self.random_layout
     }
 
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
@@ -255,28 +271,39 @@ impl BackendDevice for WgpuDevice {
         self.storage_from_cpu_storage(&storage)
     }
 
-    fn rand_uniform(&self, _: &Shape, _: DType, _: f64, _: f64) -> CandleResult<Self::Storage> {
-        Err(Error::Msg(
-            "wgpu backend: rand_uniform not yet implemented".into(),
-        ))
+    fn rand_uniform(
+        &self,
+        shape: &Shape,
+        dtype: DType,
+        lo: f64,
+        up: f64,
+    ) -> CandleResult<Self::Storage> {
+        rng::dispatch_rand_uniform(self, shape, dtype, lo, up)
     }
 
-    fn rand_normal(&self, _: &Shape, _: DType, _: f64, _: f64) -> CandleResult<Self::Storage> {
-        Err(Error::Msg(
-            "wgpu backend: rand_normal not yet implemented".into(),
-        ))
+    fn rand_normal(
+        &self,
+        shape: &Shape,
+        dtype: DType,
+        mean: f64,
+        stddev: f64,
+    ) -> CandleResult<Self::Storage> {
+        rng::dispatch_rand_normal(self, shape, dtype, mean, stddev)
     }
 
-    fn set_seed(&self, _: u64) -> CandleResult<()> {
-        Err(Error::Msg(
-            "wgpu backend: set_seed not yet implemented".into(),
-        ))
+    fn set_seed(&self, seed: u64) -> CandleResult<()> {
+        *self
+            .rng_seed
+            .write()
+            .map_err(|e| Error::Msg(e.to_string()))? = seed;
+        Ok(())
     }
 
     fn get_current_seed(&self) -> CandleResult<u64> {
-        Err(Error::Msg(
-            "wgpu backend: get_current_seed not yet implemented".into(),
-        ))
+        Ok(*self
+            .rng_seed
+            .read()
+            .map_err(|e| Error::Msg(e.to_string()))?)
     }
 
     fn synchronize(&self) -> CandleResult<()> {

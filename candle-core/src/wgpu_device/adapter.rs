@@ -101,6 +101,10 @@ impl WgpuDevice {
             caps,
             shader_cache: super::ShaderCache::new(),
             allocator: super::Allocator::new(),
+            rng_seed: std::sync::Arc::new(std::sync::RwLock::new(
+                super::rng::DEFAULT_RNG_SEED,
+            )),
+            random_layout: super::rng::RandomBindGroupLayout::new(),
         }
     }
 }

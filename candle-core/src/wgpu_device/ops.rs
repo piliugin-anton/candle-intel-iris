@@ -9,10 +9,10 @@ use super::kernel::WgpuKernel;
 use super::storage::{buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
 use super::WgpuDevice;
 use crate::backend::BackendStorage;
-use crate::op::{BinaryOpT, ReduceOp, UnaryOpT};
+use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::quantized::GgmlDType;
 use crate::wgsl::{
-    BINARY, BINARY_BF16, BINARY_F16, COPY, COPY2D, DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0,
+    BINARY, BINARY_BF16, BINARY_F16, CMP, COPY, COPY2D, DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0,
     DEQUANT_Q8_0, MATMUL_NAIVE, MATMUL_TILED, MATMUL_TILED_BF16, MATMUL_TILED_F16, MATMUL_TILED_VEC,
     MATMUL_VEC_WIDTH, QMATMUL_Q4_0, QMATMUL_Q4_K, QMATMUL_Q5_0, QMATMUL_Q8_0, QUANT_Q4_0,
     QUANT_Q5_0, QUANT_Q8_0, REDUCE, RMS_NORM, ROPE, SDPA_FULL, SDPA_VECTOR, SOFTMAX, UNARY,
@@ -430,6 +430,190 @@ pub fn dispatch_affine(
             uniforms.as_bytes(),
         )
         .map_err(Error::from)?;
+    let grid = elemwise_workgroup_count(&device, out_layout.shape().elem_count());
+    storage
+        .backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(&device, &bind_group, [grid, 1, 1]))
+        .map_err(Error::from)?;
+    Ok(out)
+}
+
+fn cmp_entry_point(op: CmpOp) -> &'static str {
+    match op {
+        CmpOp::Eq => "eq_f32",
+        CmpOp::Ne => "ne_f32",
+        CmpOp::Lt => "lt_f32",
+        CmpOp::Le => "le_f32",
+        CmpOp::Gt => "gt_f32",
+        CmpOp::Ge => "ge_f32",
+    }
+}
+
+pub fn dispatch_cmp(
+    lhs: &WgpuStorage,
+    rhs: &WgpuStorage,
+    lhs_layout: &Layout,
+    rhs_layout: &Layout,
+    op: CmpOp,
+) -> CandleResult<WgpuStorage> {
+    let dtype = lhs.dtype();
+    if dtype != rhs.dtype() {
+        return Err(Error::UnsupportedDTypeForOp(dtype, "cmp").bt());
+    }
+    let device = lhs.device().clone();
+    if dtype == DType::BF16 || dtype == DType::F16 {
+        let lhs_f32 = lhs.to_dtype(lhs_layout, DType::F32)?;
+        let rhs_f32 = rhs.to_dtype(rhs_layout, DType::F32)?;
+        let lhs_layout = Layout::contiguous(lhs_layout.shape());
+        let rhs_layout = Layout::contiguous(rhs_layout.shape());
+        return dispatch_cmp(&lhs_f32, &rhs_f32, &lhs_layout, &rhs_layout, op);
+    }
+    require_f32(dtype, "cmp")?;
+
+    let out_shape = lhs_layout.shape();
+    let out = WgpuStorage::alloc(&device, out_shape, DType::U8)?;
+    let out_layout = Layout::contiguous(out_shape);
+    let n = out_layout.shape().elem_count();
+    let align = wgpu::COPY_BUFFER_ALIGNMENT as usize;
+    out.write_bytes(&vec![0u8; n.div_ceil(align) * align])
+        .map_err(Error::from)?;
+    let uniforms = KernelUniforms::new(
+        out_layout.shape().elem_count(),
+        &out_layout,
+        lhs_layout,
+        Some(rhs_layout),
+    );
+    let entry = cmp_entry_point(op);
+    let kernel = compile_elemwise_kernel(&device, CMP, entry)?;
+    let bind_group_builder = BindGroupBuilder::new();
+    let bind_group = bind_group_builder
+        .create_bind_group_bytes(
+            device.device(),
+            device.queue(),
+            buffer_offset(&out, &out_layout),
+            buffer_offset(lhs, lhs_layout),
+            Some(buffer_offset(rhs, rhs_layout)),
+            uniforms.as_bytes(),
+        )
+        .map_err(Error::from)?;
+    let grid = elemwise_workgroup_count(&device, out_layout.shape().elem_count());
+    lhs.backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(&device, &bind_group, [grid, 1, 1]))
+        .map_err(Error::from)?;
+    Ok(out)
+}
+
+pub fn dispatch_powf(
+    storage: &WgpuStorage,
+    layout: &Layout,
+    exp: f64,
+) -> CandleResult<WgpuStorage> {
+    dispatch_unary_param(storage, layout, exp, "powf_f32", "powf_f16", "powf_bf16", "powf")
+}
+
+pub fn dispatch_elu(
+    storage: &WgpuStorage,
+    layout: &Layout,
+    alpha: f64,
+) -> CandleResult<WgpuStorage> {
+    dispatch_unary_param(storage, layout, alpha, "elu_f32", "elu_f16", "elu_bf16", "elu")
+}
+
+fn dispatch_unary_param(
+    storage: &WgpuStorage,
+    layout: &Layout,
+    param: f64,
+    entry_f32: &str,
+    entry_f16: &str,
+    entry_bf16: &str,
+    op: &'static str,
+) -> CandleResult<WgpuStorage> {
+    let dtype = storage.dtype();
+    let device = storage.device().clone();
+    if dtype == DType::BF16 {
+        if device.caps().supports_native_bf16() {
+            let out_shape = layout.shape();
+            let out = WgpuStorage::alloc(&device, out_shape, DType::BF16)?;
+            let out_layout = Layout::contiguous(out_shape);
+            let uniforms = KernelUniforms::new_unary_f32(
+                out_layout.shape().elem_count(),
+                &out_layout,
+                layout,
+                param,
+            );
+            dispatch_elemwise_bf16(ElemwiseBf16Dispatch {
+                device: &device,
+                source: UNARY_BF16,
+                entry_point: entry_bf16,
+                out: &out,
+                out_layout: &out_layout,
+                in0: storage,
+                in0_layout: layout,
+                in1: None,
+                backing: storage.backing(),
+                uniforms,
+            })
+            .map_err(Error::from)?;
+            return Ok(out);
+        }
+        let f32 = storage.to_dtype(layout, DType::F32)?;
+        let f32_layout = Layout::contiguous(layout.shape());
+        let out_f32 = dispatch_unary_param(&f32, &f32_layout, param, entry_f32, entry_f16, entry_bf16, op)?;
+        return out_f32.to_dtype(layout, DType::BF16);
+    }
+
+    if dtype == DType::F16 {
+        if device.caps().supports_native_f16() {
+            let out_shape = layout.shape();
+            let out = WgpuStorage::alloc(&device, out_shape, DType::F16)?;
+            let out_layout = Layout::contiguous(out_shape);
+            let uniforms = KernelUniforms::new_unary_f32(
+                out_layout.shape().elem_count(),
+                &out_layout,
+                layout,
+                param,
+            );
+            let kernel = compile_elemwise_kernel(&device, UNARY_F16, entry_f16)?;
+            let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
+                device.device(),
+                device.queue(),
+                buffer_offset(&out, &out_layout),
+                buffer_offset(storage, layout),
+                None,
+                uniforms.as_bytes(),
+            )?;
+            let grid = elemwise_workgroup_count(&device, out_layout.shape().elem_count());
+            storage
+                .backing()
+                .with_unmapped(|| kernel.dispatch_bind_group(&device, &bind_group, [grid, 1, 1]))
+                .map_err(Error::from)?;
+            return Ok(out);
+        }
+        let f32 = storage.to_dtype(layout, DType::F32)?;
+        let f32_layout = Layout::contiguous(layout.shape());
+        let out_f32 = dispatch_unary_param(&f32, &f32_layout, param, entry_f32, entry_f16, entry_bf16, op)?;
+        return out_f32.to_dtype(layout, DType::F16);
+    }
+
+    require_f32(dtype, op)?;
+    let out_shape = layout.shape();
+    let out = WgpuStorage::alloc(&device, out_shape, DType::F32)?;
+    let out_layout = Layout::contiguous(out_shape);
+    let uniforms = KernelUniforms::new_unary_f32(
+        out_layout.shape().elem_count(),
+        &out_layout,
+        layout,
+        param,
+    );
+    let kernel = compile_elemwise_kernel(&device, UNARY, entry_f32)?;
+    let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
+        device.device(),
+        device.queue(),
+        buffer_offset(&out, &out_layout),
+        buffer_offset(storage, layout),
+        None,
+        uniforms.as_bytes(),
+    )?;
     let grid = elemwise_workgroup_count(&device, out_layout.shape().elem_count());
     storage
         .backing()

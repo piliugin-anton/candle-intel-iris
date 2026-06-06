@@ -171,6 +171,20 @@ impl WgpuKernel {
         })
     }
 
+    /// Builds a kernel handle for random-number shaders (custom bind group layout).
+    pub fn from_random_pipeline(
+        pipeline: wgpu::ComputePipeline,
+        workgroup_size: u32,
+    ) -> Self {
+        Self {
+            pipeline,
+            bind_group_builder: BindGroupBuilder::new(),
+            extended_bind_group_builder: None,
+            sdpa_bind_group_builder: None,
+            workgroup_size,
+        }
+    }
+
     pub fn compile_with_cache(
         wgpu_device: &wgpu::Device,
         shader_cache: &ShaderCache,

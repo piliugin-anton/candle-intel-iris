@@ -3,7 +3,7 @@
 // Entry points: neg_f16, exp_f16, log_f16, sqrt_f16, abs_f16, relu_f16,
 //               recip_f16, silu_f16, sigmoid_f16, gelu_f16, gelu_erf_f16,
 //               sin_f16, cos_f16, tanh_f16, sqr_f16, erf_f16, ceil_f16,
-//               floor_f16, round_f16, sign_f16, affine_f16
+//               floor_f16, round_f16, sign_f16, affine_f16, powf_f16, elu_f16
 
 // Abramowitz & Stegun 7.1.26 — matches libm erf within ~1e-7 for typical ranges.
 fn erf_approx(x: f16) -> f16 {
@@ -288,5 +288,51 @@ fn affine_f16(
     let count = kernel_params.elem_count;
     for (var i = gid.x; i < count; i = i + stride) {
         store_out(i, load_in0(i) * mul + add);
+    }
+}
+
+@compute @workgroup_size(WG_SIZE)
+fn powf_f16(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    let exp = f16(bitcast<f32>(kernel_params._pad0));
+    let stride = grid_stride_x(num_wg);
+    let count = kernel_params.elem_count;
+    for (var i = gid.x; i < count; i = i + stride) {
+        let x = f32(load_in0(i));
+        let e = f32(exp);
+        var y: f32;
+        if (x >= 0.0) {
+            y = pow(x, e);
+        } else {
+            let exp_round = round(e);
+            if (abs(e - exp_round) > 1e-6) {
+                y = pow(x, e);
+            } else {
+                let mag = pow(-x, e);
+                let exp_i = i32(exp_round);
+                if ((exp_i & 1) == 0) {
+                    y = mag;
+                } else {
+                    y = -mag;
+                }
+            }
+        }
+        store_out(i, f16(y));
+    }
+}
+
+@compute @workgroup_size(WG_SIZE)
+fn elu_f16(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    let alpha = f16(bitcast<f32>(kernel_params._pad0));
+    let stride = grid_stride_x(num_wg);
+    let count = kernel_params.elem_count;
+    for (var i = gid.x; i < count; i = i + stride) {
+        let x = load_in0(i);
+        store_out(i, select(alpha * (exp(x) - 1.0), x, x > 0.0));
     }
 }

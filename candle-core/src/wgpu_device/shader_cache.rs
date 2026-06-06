@@ -20,6 +20,9 @@ pub const EXTENDED_KERNEL_LAYOUT_KEY: u64 = 2;
 /// Cache key for pipelines using [`super::bind_group::SdpaBindGroupLayout`] (4 inputs + mask).
 pub const SDPA_KERNEL_LAYOUT_KEY: u64 = 3;
 
+/// Cache key for pipelines using [`super::rng::RandomBindGroupLayout`].
+pub const RANDOM_KERNEL_LAYOUT_KEY: u64 = 4;
+
 /// Cache for compiled WGSL compute pipelines.
 ///
 /// Shader modules are kept alive alongside their pipelines so that pipeline

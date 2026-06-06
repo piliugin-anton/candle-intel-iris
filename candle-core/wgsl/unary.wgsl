@@ -3,7 +3,7 @@
 // Entry points: neg_f32, exp_f32, log_f32, sqrt_f32, abs_f32, relu_f32,
 //               recip_f32, silu_f32, sigmoid_f32, gelu_f32, gelu_erf_f32,
 //               sin_f32, cos_f32, tanh_f32, sqr_f32, erf_f32, ceil_f32,
-//               floor_f32, round_f32, sign_f32, affine_f32
+//               floor_f32, round_f32, sign_f32, affine_f32, powf_f32, elu_f32
 
 // Abramowitz & Stegun 7.1.26 — matches libm erf within ~1e-7 for typical ranges.
 fn erf_approx(x: f32) -> f32 {
@@ -288,5 +288,49 @@ fn affine_f32(
     let count = kernel_params.elem_count;
     for (var i = gid.x; i < count; i = i + stride) {
         store_out(i, load_in0(i) * mul + add);
+    }
+}
+
+// `_pad0` holds the exponent / alpha as an f32 bit pattern.
+fn powf_f32_val(x: f32, exp: f32) -> f32 {
+    if (x >= 0.0) {
+        return pow(x, exp);
+    }
+    let exp_round = round(exp);
+    if (abs(exp - exp_round) > 1e-6) {
+        return pow(x, exp);
+    }
+    let mag = pow(-x, exp);
+    let exp_i = i32(exp_round);
+    if ((exp_i & 1) == 0) {
+        return mag;
+    }
+    return -mag;
+}
+
+@compute @workgroup_size(WG_SIZE)
+fn powf_f32(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    let exp = bitcast<f32>(kernel_params._pad0);
+    let stride = grid_stride_x(num_wg);
+    let count = kernel_params.elem_count;
+    for (var i = gid.x; i < count; i = i + stride) {
+        store_out(i, powf_f32_val(load_in0(i), exp));
+    }
+}
+
+@compute @workgroup_size(WG_SIZE)
+fn elu_f32(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    let alpha = bitcast<f32>(kernel_params._pad0);
+    let stride = grid_stride_x(num_wg);
+    let count = kernel_params.elem_count;
+    for (var i = gid.x; i < count; i = i + stride) {
+        let x = load_in0(i);
+        store_out(i, select(alpha * (exp(x) - 1.0), x, x > 0.0));
     }
 }

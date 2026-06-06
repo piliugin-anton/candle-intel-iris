@@ -133,6 +133,23 @@ pub const UPSAMPLE_NEAREST2D: &str = include_str!("../wgsl/upsample_nearest2d.wg
 pub const UPSAMPLE_BILINEAR2D: &str = include_str!("../wgsl/upsample_bilinear2d.wgsl");
 pub const CONV_TRANSPOSE2D: &str = include_str!("../wgsl/conv_transpose2d.wgsl");
 pub const CONV_TRANSPOSE1D: &str = include_str!("../wgsl/conv_transpose1d.wgsl");
+pub const INDEXING: &str = include_str!("../wgsl/indexing.wgsl");
+pub const CONST_SET_F32: &str = concat!(
+    include_str!("../wgsl/common.wgsl"),
+    include_str!("../wgsl/const_set_f32.wgsl")
+);
+pub const CONST_SET_F16: &str = concat!(
+    include_str!("../wgsl/common_f16.wgsl"),
+    include_str!("../wgsl/const_set_f16.wgsl")
+);
+pub const CONST_SET_BF16: &str = concat!(
+    include_str!("../wgsl/common_bf16.wgsl"),
+    include_str!("../wgsl/const_set_bf16.wgsl")
+);
+pub const CONST_SET_U32: &str = include_str!("../wgsl/const_set_u32.wgsl");
+pub const CONST_SET_U8: &str = include_str!("../wgsl/const_set_u8.wgsl");
+pub const CMP: &str = include_str!("../wgsl/cmp.wgsl");
+pub const RANDOM: &str = include_str!("../wgsl/random.wgsl");
 
 #[cfg(test)]
 mod tests {
@@ -186,6 +203,21 @@ mod tests {
         assert!(UPSAMPLE_BILINEAR2D.contains("fn upsample_bilinear2d_f32"));
         assert!(CONV_TRANSPOSE2D.contains("fn conv_transpose2d_f32"));
         assert!(CONV_TRANSPOSE1D.contains("fn conv_transpose1d_f32"));
+        assert!(INDEXING.contains("fn index_select_f32_u32"));
+        assert!(INDEXING.contains("fn gather_f32_u32"));
+        assert!(INDEXING.contains("fn scatter_f32_u32"));
+        assert!(INDEXING.contains("fn index_add_f32_u32"));
+        assert!(CONST_SET_F32.contains("fn const_set_f32"));
+        assert!(CONST_SET_U32.contains("fn const_set_u32"));
+        assert!(CONST_SET_U8.contains("fn const_set_u8"));
+        assert!(CMP.contains("fn eq_f32"));
+        assert!(CMP.contains("fn ge_f32"));
+        assert!(UNARY.contains("fn powf_f32"));
+        assert!(UNARY.contains("fn elu_f32"));
+        assert!(UNARY_F16.contains("fn powf_f16"));
+        assert!(UNARY_BF16.contains("fn powf_bf16"));
+        assert!(RANDOM.contains("fn rand_uniform_f32"));
+        assert!(RANDOM.contains("fn rand_normal_f32"));
     }
 
     #[test]

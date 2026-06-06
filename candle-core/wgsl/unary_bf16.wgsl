@@ -245,3 +245,45 @@ fn affine_bf16(@builtin(workgroup_id) wg_id: vec3<u32>) {
         store_bf16_out(i, load_bf16_in0(i) * mul + add);
     }
 }
+
+@compute @workgroup_size(1)
+fn powf_bf16(@builtin(workgroup_id) wg_id: vec3<u32>) {
+    if (wg_id.x != 0u) {
+        return;
+    }
+    let exp = bitcast<f32>(kernel_params._pad0);
+    for (var i = 0u; i < kernel_params.elem_count; i = i + 1u) {
+        let x = f32(load_bf16_in0(i));
+        var y: f32;
+        if (x >= 0.0) {
+            y = pow(x, exp);
+        } else {
+            let exp_round = round(exp);
+            if (abs(exp - exp_round) > 1e-6) {
+                y = pow(x, exp);
+            } else {
+                let mag = pow(-x, exp);
+                let exp_i = i32(exp_round);
+                if ((exp_i & 1) == 0) {
+                    y = mag;
+                } else {
+                    y = -mag;
+                }
+            }
+        }
+        store_bf16_out(i, bf16(y));
+    }
+}
+
+@compute @workgroup_size(1)
+fn elu_bf16(@builtin(workgroup_id) wg_id: vec3<u32>) {
+    if (wg_id.x != 0u) {
+        return;
+    }
+    let alpha = bitcast<f32>(kernel_params._pad0);
+    for (var i = 0u; i < kernel_params.elem_count; i = i + 1u) {
+        let x = f32(load_bf16_in0(i));
+        let y = select(alpha * (exp(x) - 1.0), x, x > 0.0);
+        store_bf16_out(i, bf16(y));
+    }
+}
