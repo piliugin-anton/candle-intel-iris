@@ -27,6 +27,8 @@ pub struct IntelCaps {
     pub elem_workgroup_size: u32,
     pub reduce_workgroup_size: u32,
     pub matmul_tile_size: u32,
+    /// Inner-loop vector width for tiled matmul (`VEC` in WGSL).
+    pub matmul_vec_width: u32,
     pub supports_shader_f16: bool,
     pub supports_shader_bf16: bool,
     pub uma_auto_map_threshold: usize,
@@ -44,7 +46,13 @@ impl IntelCaps {
         let generation = detect_generation(info);
         let subgroup_min = info.subgroup_min_size;
         let subgroup_max = info.subgroup_max_size;
-        let elem_workgroup_size = if subgroup_min > 0 {
+        // subgroup_min is the hardware minimum subgroup width, not an optimal workgroup size.
+        // Elemwise shaders use grid-stride loops; prefer 32-wide workgroups when supported.
+        let elem_workgroup_size = if subgroup_max >= crate::wgsl::ELEM_WORKGROUP_SIZE {
+            crate::wgsl::ELEM_WORKGROUP_SIZE
+        } else if subgroup_max > 0 {
+            subgroup_max
+        } else if subgroup_min > 0 {
             subgroup_min
         } else {
             crate::wgsl::ELEM_WORKGROUP_SIZE
@@ -55,6 +63,12 @@ impl IntelCaps {
         // wgpu 29 does not expose a dedicated bf16 shader feature; infer from generation.
         let supports_shader_bf16 =
             supports_shader_f16 && matches!(detect_generation(info), IntelGeneration::Gen12Plus);
+        // Wider vec4 dot unrolls help Gen12+ Xe ALUs on contiguous GEMM tiles.
+        let matmul_vec_width = if matches!(generation, IntelGeneration::Gen12Plus) {
+            8
+        } else {
+            crate::wgsl::MATMUL_VEC_WIDTH
+        };
 
         Self {
             generation,
@@ -63,6 +77,7 @@ impl IntelCaps {
             elem_workgroup_size,
             reduce_workgroup_size,
             matmul_tile_size: crate::wgsl::MATMUL_WORKGROUP_SIZE,
+            matmul_vec_width,
             supports_shader_f16,
             supports_shader_bf16,
             uma_auto_map_threshold,
@@ -80,6 +95,7 @@ impl IntelCaps {
             elem_workgroup_size: crate::wgsl::ELEM_WORKGROUP_SIZE,
             reduce_workgroup_size: crate::wgsl::REDUCE_WORKGROUP_SIZE,
             matmul_tile_size: crate::wgsl::MATMUL_WORKGROUP_SIZE,
+            matmul_vec_width: crate::wgsl::MATMUL_VEC_WIDTH,
             supports_shader_f16: false,
             supports_shader_bf16: false,
             uma_auto_map_threshold: DEFAULT_UMA_AUTO_MAP_THRESHOLD,
@@ -183,14 +199,21 @@ pub fn tune_shader_source(source: &str, caps: &IntelCaps) -> String {
     out
 }
 
-/// Inject matrix-multiply tile size from device caps.
+/// Inject matrix-multiply tile size and inner-loop vector width from device caps.
 pub fn tune_matmul_shader_source(source: &str, caps: &IntelCaps) -> String {
-    inject_workgroup_size(
+    let mut out = inject_workgroup_size(
         source,
         "MATMUL_WG_SIZE",
         crate::wgsl::MATMUL_WORKGROUP_SIZE,
         caps.matmul_tile_size,
-    )
+    );
+    out = inject_workgroup_size(
+        &out,
+        "VEC",
+        crate::wgsl::MATMUL_VEC_WIDTH,
+        caps.matmul_vec_width,
+    );
+    out
 }
 
 #[cfg(test)]
@@ -264,6 +287,24 @@ mod tests {
         };
         assert_eq!(caps.effective_compute_dtype(DType::F16), DType::F16);
         assert_eq!(caps.effective_compute_dtype(DType::BF16), DType::BF16);
+    }
+
+    #[test]
+    fn elem_workgroup_prefers_32_when_subgroup_max_allows() {
+        let info = intel_info(0x9A49, "Intel Iris Xe Graphics");
+        assert_eq!(info.subgroup_min_size, 8);
+        assert_eq!(info.subgroup_max_size, 32);
+        // Mirrors `from_adapter` policy without a live wgpu device.
+        let elem_workgroup_size = if info.subgroup_max_size >= crate::wgsl::ELEM_WORKGROUP_SIZE {
+            crate::wgsl::ELEM_WORKGROUP_SIZE
+        } else if info.subgroup_max_size > 0 {
+            info.subgroup_max_size
+        } else if info.subgroup_min_size > 0 {
+            info.subgroup_min_size
+        } else {
+            crate::wgsl::ELEM_WORKGROUP_SIZE
+        };
+        assert_eq!(elem_workgroup_size, 32);
     }
 
     #[test]

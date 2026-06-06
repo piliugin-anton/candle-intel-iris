@@ -40,9 +40,12 @@ var<storage, read> mm_params: MatMulParams;
 
 fn mm_elem_index(tensor_layout: TensorLayout, batch: u32, d1: u32, d2: u32) -> u32 {
     if (tensor_layout.num_dims < 3u) {
-        return d1 * tensor_layout.strides[0] + d2 * tensor_layout.strides[1];
+        return tensor_layout.offset + d1 * tensor_layout.strides[0] + d2 * tensor_layout.strides[1];
     }
-    return batch * tensor_layout.strides[0] + d1 * tensor_layout.strides[1] + d2 * tensor_layout.strides[2];
+    return tensor_layout.offset
+        + batch * tensor_layout.strides[0]
+        + d1 * tensor_layout.strides[1]
+        + d2 * tensor_layout.strides[2];
 }
 
 fn mm_load_a(batch: u32, row: u32, col: u32) -> f16 {

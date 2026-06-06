@@ -112,8 +112,7 @@ where
 }
 
 fn workgroup_count(device: &WgpuDevice, elem_count: usize) -> u32 {
-    let wg = device.caps().elem_workgroup_size;
-    (elem_count as u32).div_ceil(wg)
+    super::kernel::elemwise_workgroup_count(device, elem_count)
 }
 
 fn compile_standard_kernel(

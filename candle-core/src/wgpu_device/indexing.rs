@@ -1,6 +1,6 @@
 use super::bind_group::{BindGroupBuilder, IndexingUniforms};
 use super::error::{Result, WgpuError};
-use super::kernel::WgpuKernel;
+use super::kernel::{elemwise_workgroup_count, WgpuKernel};
 use super::ops::{dispatch_copy_strided_src, dispatch_copy_strided_u32};
 use super::storage::{buffer_offset, WgpuStorage};
 use crate::backend::BackendStorage;
@@ -128,8 +128,7 @@ fn dispatch_indexing(
         Some(buffer_offset(ids, ids_layout)),
         uniforms.as_bytes(),
     )?;
-    let wg = device.caps().elem_workgroup_size;
-    let grid = (elem_count as u32).div_ceil(wg);
+    let grid = elemwise_workgroup_count(device, elem_count);
     output
         .backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;

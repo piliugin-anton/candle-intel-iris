@@ -369,9 +369,19 @@ impl WgpuDevice {
     }
 }
 
-fn workgroup_count(workgroup_size: u32, elem_count: usize) -> u32 {
+/// WebGPU limits each dispatch dimension to 65535 workgroups.
+pub(crate) const MAX_DISPATCH_WORKGROUPS: u32 = 65535;
+
+/// Workgroup count for grid-stride element kernels (capped at [`MAX_DISPATCH_WORKGROUPS`]).
+pub(crate) fn workgroup_count(workgroup_size: u32, elem_count: usize) -> u32 {
     let size = workgroup_size.max(1);
-    (elem_count as u32).div_ceil(size)
+    (elem_count as u32)
+        .div_ceil(size)
+        .min(MAX_DISPATCH_WORKGROUPS)
+}
+
+pub(crate) fn elemwise_workgroup_count(device: &WgpuDevice, elem_count: usize) -> u32 {
+    workgroup_count(device.caps().elem_workgroup_size, elem_count)
 }
 
 #[cfg(test)]
@@ -384,5 +394,11 @@ mod tests {
         assert_eq!(workgroup_count(8, 1), 1);
         assert_eq!(workgroup_count(8, 8), 1);
         assert_eq!(workgroup_count(8, 9), 2);
+    }
+
+    #[test]
+    fn workgroup_count_caps_at_max_dispatch() {
+        let huge = MAX_DISPATCH_WORKGROUPS as usize * 8 + 1;
+        assert_eq!(workgroup_count(8, huge), MAX_DISPATCH_WORKGROUPS);
     }
 }

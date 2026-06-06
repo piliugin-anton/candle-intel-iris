@@ -5,7 +5,7 @@ use super::bind_group::{
 };
 use super::error::{Result, WgpuError};
 use super::intel_caps::{tune_matmul_shader_source, IntelGeneration};
-use super::kernel::WgpuKernel;
+use super::kernel::{elemwise_workgroup_count, workgroup_count, WgpuKernel};
 use super::storage::{
     buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE,
 };
@@ -17,7 +17,8 @@ use crate::wgsl::{
     BINARY, BINARY_BF16, BINARY_F16, BINARY_I32, BINARY_U32, CAST, CMP, CMP_BF16, CMP_F16, COPY,
     COPY2D, COPY2D_BF16,
     COPY2D_F16, COPY_BF16, COPY_F16, COPY_U32, DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0,
-    DEQUANT_Q8_0, LAYER_NORM, LAYER_NORM_BF16, LAYER_NORM_F16, MATMUL_NAIVE, MATMUL_TILED,
+    DEQUANT_Q8_0, LAYER_NORM, LAYER_NORM_BF16, LAYER_NORM_F16, MATMUL_GEMV, MATMUL_NAIVE,
+    MATMUL_TILED,
     MATMUL_TILED_BF16, MATMUL_TILED_BF16ACC, MATMUL_TILED_F16, MATMUL_TILED_F16ACC,
     MATMUL_TILED_VEC, MATMUL_VEC_WIDTH, QMATMUL_Q4_0, QMATMUL_Q4_0_F16, QMATMUL_Q4_K,
     QMATMUL_Q4_K_F16, QMATMUL_Q5_0, QMATMUL_Q5_0_F16, QMATMUL_Q8_0, QMATMUL_Q8_0_F16,
@@ -30,11 +31,6 @@ use crate::wgsl::{
 use crate::{DType, Error, Layout, Result as CandleResult, Shape};
 use std::sync::Arc;
 use wgpu::BufferUsages;
-
-fn elemwise_workgroup_count(device: &WgpuDevice, elem_count: usize) -> u32 {
-    let wg = device.caps().elem_workgroup_size;
-    (elem_count as u32).div_ceil(wg)
-}
 
 fn require_f32(dtype: DType, op: &'static str) -> CandleResult<()> {
     if dtype == DType::F32 {
@@ -93,6 +89,8 @@ fn require_matmul_dtype(dtype: DType, op: &'static str) -> CandleResult<()> {
 /// Selected matrix-multiply kernel variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MatMulKernel {
+    GemvF32,
+    GemvColF32,
     NaiveF32,
     TiledF32,
     TiledVecF32,
@@ -116,44 +114,51 @@ fn select_matmul_kernel(
     let caps = device.caps();
     let compute_dtype = caps.effective_compute_dtype(storage_dtype);
     let tiled = caps.generation != IntelGeneration::NonIntel;
-    let vec_aligned =
-        k.is_multiple_of(MATMUL_VEC_WIDTH as usize) && n.is_multiple_of(MATMUL_VEC_WIDTH as usize);
+    let tile = caps.matmul_tile_size as usize;
+    let vec_width = caps.matmul_vec_width as usize;
+    let vec_aligned = k.is_multiple_of(vec_width) && n.is_multiple_of(vec_width);
     let large_enough = m >= 8 || n >= 8 || k >= 8;
+    // Tiled kernels pay 2 barriers per K-tile; prefer naive when M or N is thinner than a tile.
+    let use_tiled = tiled && large_enough && m >= tile && n >= tile;
 
     match (storage_dtype, compute_dtype) {
         (DType::F16, DType::F32) if caps.supports_shader_f16 => {
-            if tiled && vec_aligned && large_enough {
+            if use_tiled && vec_aligned {
                 MatMulKernel::TiledVecF16AccF32
             } else {
                 MatMulKernel::TiledF16AccF32
             }
         }
         (DType::F16, DType::F16) if caps.supports_native_f16() => {
-            if tiled && vec_aligned && large_enough {
+            if use_tiled && vec_aligned {
                 MatMulKernel::TiledVecF16
             } else {
                 MatMulKernel::TiledF16
             }
         }
         (DType::BF16, DType::F32) => {
-            if tiled && vec_aligned && large_enough {
+            if use_tiled && vec_aligned {
                 MatMulKernel::TiledVecBf16AccF32
             } else {
                 MatMulKernel::TiledBf16AccF32
             }
         }
         (DType::BF16, DType::BF16) if caps.supports_native_bf16() => {
-            if tiled && vec_aligned && large_enough {
+            if use_tiled && vec_aligned {
                 MatMulKernel::TiledVecBf16
             } else {
                 MatMulKernel::TiledBf16
             }
         }
         _ => {
-            if tiled && vec_aligned && large_enough {
+            if use_tiled && vec_aligned {
                 MatMulKernel::TiledVecF32
-            } else if tiled {
+            } else if use_tiled {
                 MatMulKernel::TiledF32
+            } else if m == 1 {
+                MatMulKernel::GemvF32
+            } else if n == 1 {
+                MatMulKernel::GemvColF32
             } else {
                 MatMulKernel::NaiveF32
             }
@@ -161,8 +166,32 @@ fn select_matmul_kernel(
     }
 }
 
+fn matmul_dispatch_grid(
+    kernel: MatMulKernel,
+    device: &WgpuDevice,
+    b: usize,
+    m: usize,
+    n: usize,
+) -> [u32; 3] {
+    match kernel {
+        MatMulKernel::GemvF32 => {
+            let wg = device.caps().elem_workgroup_size;
+            [workgroup_count(wg, n), 1, b as u32]
+        }
+        MatMulKernel::GemvColF32 => {
+            let wg = device.caps().elem_workgroup_size;
+            [workgroup_count(wg, m), 1, b as u32]
+        }
+        _ => {
+            let wg = device.caps().matmul_tile_size;
+            [(n as u32).div_ceil(wg), (m as u32).div_ceil(wg), b as u32]
+        }
+    }
+}
+
 fn matmul_shader_source(kernel: MatMulKernel) -> &'static str {
     match kernel {
+        MatMulKernel::GemvF32 | MatMulKernel::GemvColF32 => MATMUL_GEMV,
         MatMulKernel::NaiveF32 => MATMUL_NAIVE,
         MatMulKernel::TiledF32 => MATMUL_TILED,
         MatMulKernel::TiledVecF32 => MATMUL_TILED_VEC,
@@ -175,6 +204,8 @@ fn matmul_shader_source(kernel: MatMulKernel) -> &'static str {
 
 fn matmul_entry_point(kernel: MatMulKernel) -> &'static str {
     match kernel {
+        MatMulKernel::GemvF32 => "matmul_gemv_f32",
+        MatMulKernel::GemvColF32 => "matmul_gemv_col_f32",
         MatMulKernel::NaiveF32 => "matmul_naive_f32",
         MatMulKernel::TiledF32 => "matmul_tiled_f32",
         MatMulKernel::TiledVecF32 => "matmul_tiled_vec_f32",
@@ -487,9 +518,17 @@ fn dispatch_elemwise_int(args: ElemwiseIntDispatch<'_>) -> Result<()> {
 fn compile_matmul_kernel(device: &WgpuDevice, kernel: MatMulKernel) -> Result<WgpuKernel> {
     let source = matmul_shader_source(kernel);
     let entry = matmul_entry_point(kernel);
-    let tuned = tune_matmul_shader_source(source, device.caps());
-    let tile = device.caps().matmul_tile_size;
-    WgpuKernel::compile_with_workgroup_size(device, &tuned, entry, tile)
+    let caps = device.caps();
+    let (tuned, wg) = match kernel {
+        MatMulKernel::GemvF32 | MatMulKernel::GemvColF32 => {
+            (super::intel_caps::tune_shader_source(source, caps), caps.elem_workgroup_size)
+        }
+        _ => (
+            tune_matmul_shader_source(source, caps),
+            caps.matmul_tile_size,
+        ),
+    };
+    WgpuKernel::compile_with_workgroup_size(device, &tuned, entry, wg)
 }
 
 fn compile_reduce_kernel(
@@ -1228,10 +1267,7 @@ fn dispatch_matmul_inner(
         )
         .map_err(Error::from)?;
 
-    let wg = device.caps().matmul_tile_size;
-    let grid_x = (n as u32).div_ceil(wg);
-    let grid_y = (m as u32).div_ceil(wg);
-    let grid_z = b as u32;
+    let [grid_x, grid_y, grid_z] = matmul_dispatch_grid(kernel_kind, &device, b, m, n);
 
     lhs.backing()
         .with_unmapped(|| {
@@ -1742,7 +1778,7 @@ pub fn dispatch_cast_f32_u32(src: &WgpuStorage, layout: &Layout) -> Result<WgpuS
         uniforms.as_bytes(),
     )?;
     let elem_count = out_layout.shape().elem_count();
-    let grid = (elem_count as u32).div_ceil(32);
+    let grid = workgroup_count(32, elem_count);
     src.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;
     Ok(out)
@@ -1784,8 +1820,7 @@ pub fn dispatch_copy_strided_u32(
         None,
         uniforms.as_bytes(),
     )?;
-    let wg = device.caps().elem_workgroup_size;
-    let grid = (elem_count as u32).div_ceil(wg);
+    let grid = elemwise_workgroup_count(device, elem_count);
     src.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;
     Ok(())
@@ -1839,8 +1874,7 @@ pub fn dispatch_copy_strided_src(
         None,
         uniforms.as_bytes(),
     )?;
-    let wg = device.caps().elem_workgroup_size;
-    let grid = (elem_count as u32).div_ceil(wg);
+    let grid = elemwise_workgroup_count(device, elem_count);
     src.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;
     Ok(())
@@ -1915,9 +1949,8 @@ pub fn dispatch_copy2d(
         None,
         uniforms.as_bytes(),
     )?;
-    let total = (params.d1 * params.d2) as u32;
-    let wg = device.caps().elem_workgroup_size;
-    let grid = total.div_ceil(wg);
+    let total = params.d1 * params.d2;
+    let grid = elemwise_workgroup_count(device, total);
     dst.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;
     Ok(())
@@ -2310,7 +2343,7 @@ pub fn dispatch_rope_i(
             uniforms.as_bytes(),
         )
         .map_err(Error::from)?;
-    let grid = ((b * h * t * d / 2) as u32).div_ceil(32);
+    let grid = workgroup_count(32, b * h * t * d / 2);
     src.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
         .map_err(Error::from)?;
@@ -2367,7 +2400,7 @@ pub fn dispatch_rope_thd(
             uniforms.as_bytes(),
         )
         .map_err(Error::from)?;
-    let grid = ((b * t * h * d / 2) as u32).div_ceil(32);
+    let grid = workgroup_count(32, b * t * h * d / 2);
     src.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
         .map_err(Error::from)?;
@@ -2430,8 +2463,7 @@ pub fn dispatch_where_u8_f32(
             uniforms.as_bytes(),
         )
         .map_err(Error::from)?;
-    let wg = 32u32;
-    let grid = (elem_count as u32).div_ceil(wg);
+    let grid = workgroup_count(32, elem_count);
     cond.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
         .map_err(Error::from)?;

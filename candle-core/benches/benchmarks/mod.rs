@@ -40,6 +40,11 @@ impl BenchDevice for Device {
                 #[cfg(not(feature = "metal"))]
                 panic!("Metal device without metal feature enabled: {device:?}")
             }
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                use candle_core::backend::BackendDevice;
+                Ok(device.synchronize()?)
+            }
         }
     }
 
@@ -57,6 +62,17 @@ impl BenchDevice for Device {
             }
             Device::Cuda(_) => format!("cuda_{}", name.into()),
             Device::Metal(_) => format!("metal_{}", name.into()),
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                use candle_core::IntelGeneration;
+                let tag = match device.caps().generation {
+                    IntelGeneration::Gen11 => "wgpu_gen11",
+                    IntelGeneration::Gen12Plus => "wgpu_gen12",
+                    IntelGeneration::Older => "wgpu_intel",
+                    IntelGeneration::NonIntel => "wgpu",
+                };
+                format!("{tag}_{}", name.into())
+            }
         }
     }
 }
@@ -72,6 +88,8 @@ impl BenchDeviceHandler {
             devices.push(Device::new_metal(0)?);
         } else if cfg!(feature = "cuda") {
             devices.push(Device::new_cuda(0)?);
+        } else if cfg!(feature = "wgpu") {
+            devices.push(Device::new_wgpu()?);
         } else {
             devices.push(Device::Cpu);
         }

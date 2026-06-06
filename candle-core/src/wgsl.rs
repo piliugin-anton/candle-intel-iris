@@ -61,6 +61,10 @@ pub const MATMUL_NAIVE: &str = concat!(
     include_str!("../wgsl/matmul_common.wgsl"),
     include_str!("../wgsl/matmul_naive.wgsl")
 );
+pub const MATMUL_GEMV: &str = concat!(
+    include_str!("../wgsl/matmul_common.wgsl"),
+    include_str!("../wgsl/matmul_gemv.wgsl")
+);
 pub const MATMUL_TILED: &str = concat!(
     include_str!("../wgsl/matmul_common.wgsl"),
     include_str!("../wgsl/matmul_tiled.wgsl")

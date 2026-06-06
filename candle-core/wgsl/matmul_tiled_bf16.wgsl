@@ -8,20 +8,26 @@ const VEC: u32 = 4u;
 var<workgroup> tile_a: array<f32, 256>;
 var<workgroup> tile_b: array<f32, 256>;
 
-fn tile_dot_vec4_bf16(ty: u32, tx: u32, k_base: u32) -> f32 {
-    let a_vec = vec4<f32>(
-        tile_a[ty * TILE + k_base],
-        tile_a[ty * TILE + k_base + 1u],
-        tile_a[ty * TILE + k_base + 2u],
-        tile_a[ty * TILE + k_base + 3u],
-    );
-    let b_vec = vec4<f32>(
-        tile_b[k_base * TILE + tx],
-        tile_b[(k_base + 1u) * TILE + tx],
-        tile_b[(k_base + 2u) * TILE + tx],
-        tile_b[(k_base + 3u) * TILE + tx],
-    );
-    return dot(a_vec, b_vec);
+fn tile_dot_vec_bf16(ty: u32, tx: u32, k_base: u32) -> f32 {
+    var acc = 0.0;
+    let steps = VEC / 4u;
+    for (var i = 0u; i < steps; i = i + 1u) {
+        let kb = k_base + i * 4u;
+        let a_vec = vec4<f32>(
+            tile_a[ty * TILE + kb],
+            tile_a[ty * TILE + kb + 1u],
+            tile_a[ty * TILE + kb + 2u],
+            tile_a[ty * TILE + kb + 3u],
+        );
+        let b_vec = vec4<f32>(
+            tile_b[kb * TILE + tx],
+            tile_b[(kb + 1u) * TILE + tx],
+            tile_b[(kb + 2u) * TILE + tx],
+            tile_b[(kb + 3u) * TILE + tx],
+        );
+        acc += dot(a_vec, b_vec);
+    }
+    return acc;
 }
 
 @compute @workgroup_size(TILE, TILE)
@@ -63,7 +69,7 @@ fn matmul_tiled_bf16(
         workgroupBarrier();
 
         for (var k = 0u; k < TILE; k = k + 1u) {
-            acc += tile_a[ty * TILE + k] * tile_b[k * TILE + tx];
+            acc = fma(tile_a[ty * TILE + k], tile_b[k * TILE + tx], acc);
         }
 
         workgroupBarrier();
@@ -113,13 +119,7 @@ fn matmul_tiled_vec_bf16(
         workgroupBarrier();
 
         for (var k = 0u; k < TILE; k = k + VEC) {
-            if (k + VEC <= TILE) {
-                acc += tile_dot_vec4_bf16(ty, tx, k);
-            } else {
-                for (var kk = k; kk < TILE; kk = kk + 1u) {
-                    acc += tile_a[ty * TILE + kk] * tile_b[kk * TILE + tx];
-                }
-            }
+            acc += tile_dot_vec_bf16(ty, tx, k);
         }
 
         workgroupBarrier();

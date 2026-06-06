@@ -309,7 +309,10 @@ fn cast_dispatch_params(entry: &str, elem_count: usize) -> (u32, u32) {
         "cast_u8_f32" | "cast_f32_u8" => elem_count.div_ceil(4),
         _ => elem_count,
     };
-    (CAST_WG_SIZE, (parallel_elems as u32).div_ceil(CAST_WG_SIZE))
+    (
+        CAST_WG_SIZE,
+        super::kernel::workgroup_count(CAST_WG_SIZE, parallel_elems),
+    )
 }
 
 fn cast_entry_point(from: DType, to: DType) -> Option<&'static str> {

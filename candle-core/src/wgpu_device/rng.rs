@@ -1,5 +1,5 @@
 use super::error::Result;
-use super::kernel::WgpuKernel;
+use super::kernel::{elemwise_workgroup_count, WgpuKernel};
 use super::shader_cache::RANDOM_KERNEL_LAYOUT_KEY;
 use super::storage::WgpuStorage;
 use super::WgpuDevice;
@@ -184,8 +184,7 @@ fn dispatch_random_f32(
             &uniforms,
         )
         .map_err(Error::from)?;
-    let wg = device.caps().elem_workgroup_size;
-    let grid = (elem_count as u32).div_ceil(wg);
+    let grid = elemwise_workgroup_count(device, elem_count);
     out.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
         .map_err(Error::from)?;

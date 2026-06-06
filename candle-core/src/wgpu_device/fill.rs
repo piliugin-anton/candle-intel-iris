@@ -1,6 +1,6 @@
 use super::bind_group::{BindGroupBuilder, KernelUniforms};
 use super::error::Result;
-use super::kernel::WgpuKernel;
+use super::kernel::{elemwise_workgroup_count, WgpuKernel};
 use super::storage::{BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
 use crate::backend::BackendStorage;
 use crate::scalar::Scalar;
@@ -51,8 +51,7 @@ fn dispatch_const_set_kernel(
         Some(dummy),
         uniforms.as_bytes(),
     )?;
-    let wg = device.caps().elem_workgroup_size;
-    let grid = (elem_count as u32).div_ceil(wg);
+    let grid = elemwise_workgroup_count(device, elem_count);
     storage
         .backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;

@@ -49,7 +49,7 @@ fn matmul_tiled_f32(
         workgroupBarrier();
 
         for (var k = 0u; k < TILE; k = k + 1u) {
-            acc += tile_a[ty * TILE + k] * tile_b[k * TILE + tx];
+            acc = fma(tile_a[ty * TILE + k], tile_b[k * TILE + tx], acc);
         }
 
         workgroupBarrier();
