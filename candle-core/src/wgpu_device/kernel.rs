@@ -1,10 +1,9 @@
 use super::async_io::poll_device;
 use super::bind_group::{
     BindGroupBuilder, ExtendedBindGroupArgs, ExtendedBindGroupBuilder, KernelUniforms,
-    StandardBindGroupArgs,
-    StandardBindGroupLayout,
+    SdpaBindGroupArgs, SdpaBindGroupBuilder, StandardBindGroupArgs, StandardBindGroupLayout,
 };
-use super::shader_cache::EXTENDED_KERNEL_LAYOUT_KEY;
+use super::shader_cache::{EXTENDED_KERNEL_LAYOUT_KEY, SDPA_KERNEL_LAYOUT_KEY};
 use super::error::Result;
 use super::intel_caps::tune_shader_source;
 use super::shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
@@ -18,6 +17,7 @@ pub struct WgpuKernel {
     pipeline: wgpu::ComputePipeline,
     bind_group_builder: BindGroupBuilder,
     extended_bind_group_builder: Option<ExtendedBindGroupBuilder>,
+    sdpa_bind_group_builder: Option<SdpaBindGroupBuilder>,
     workgroup_size: u32,
 }
 
@@ -112,6 +112,7 @@ impl WgpuKernel {
             pipeline,
             bind_group_builder,
             extended_bind_group_builder: None,
+            sdpa_bind_group_builder: None,
             workgroup_size,
         })
     }
@@ -138,6 +139,34 @@ impl WgpuKernel {
             pipeline,
             bind_group_builder: BindGroupBuilder::new(),
             extended_bind_group_builder: Some(extended_bind_group_builder),
+            sdpa_bind_group_builder: None,
+            workgroup_size,
+        })
+    }
+
+    pub fn compile_sdpa(
+        device: &WgpuDevice,
+        source: &str,
+        entry_point: &str,
+        workgroup_size: u32,
+    ) -> Result<Self> {
+        let sdpa_bind_group_builder = SdpaBindGroupBuilder::new();
+        let layout = sdpa_bind_group_builder
+            .bind_group_layout()
+            .get_or_create(device.device())?;
+        let pipeline = device.shader_cache().get_or_create_pipeline_with_layout(
+            device.device(),
+            Some(&layout),
+            SDPA_KERNEL_LAYOUT_KEY,
+            source,
+            entry_point,
+        )?;
+
+        Ok(Self {
+            pipeline,
+            bind_group_builder: BindGroupBuilder::new(),
+            extended_bind_group_builder: None,
+            sdpa_bind_group_builder: Some(sdpa_bind_group_builder),
             workgroup_size,
         })
     }
@@ -162,6 +191,7 @@ impl WgpuKernel {
             pipeline,
             bind_group_builder: BindGroupBuilder::new(),
             extended_bind_group_builder: None,
+            sdpa_bind_group_builder: None,
             workgroup_size,
         })
     }
@@ -260,6 +290,34 @@ impl WgpuKernel {
                 input0,
                 input1,
                 input2,
+                uniform_bytes,
+            },
+        )
+    }
+
+    pub fn create_sdpa_bind_group(
+        &self,
+        device: &WgpuDevice,
+        output: BufferOffset<'_>,
+        q: BufferOffset<'_>,
+        k: BufferOffset<'_>,
+        v: BufferOffset<'_>,
+        mask: BufferOffset<'_>,
+        uniform_bytes: &[u8],
+    ) -> Result<wgpu::BindGroup> {
+        let builder = self
+            .sdpa_bind_group_builder
+            .as_ref()
+            .ok_or_else(|| super::error::WgpuError::Message("kernel is not sdpa".into()))?;
+        builder.create_bind_group(
+            device.device(),
+            device.queue(),
+            SdpaBindGroupArgs {
+                output,
+                q,
+                k,
+                v,
+                mask,
                 uniform_bytes,
             },
         )

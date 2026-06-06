@@ -2,8 +2,9 @@ use super::{GgmlDType, QStorage};
 use crate::custom_op::CustomOp1;
 use crate::quantized::k_quants::GgmlType;
 use crate::wgpu_device::{
-    dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k, dispatch_qmatmul_q8_0, upload_quant_weights,
-    wait_for_buffer_map, WgpuStorage, STORAGE_BUFFER_USAGE,
+    dispatch_dequant_f32, dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k, dispatch_qmatmul_q5_0,
+    dispatch_qmatmul_q8_0, dispatch_quant_f32, gpu_dequant_supported, gpu_quant_supported,
+    upload_quant_weights, wait_for_buffer_map, WgpuStorage, STORAGE_BUFFER_USAGE,
 };
 use crate::{backend::BackendStorage, CpuStorage, DType, Layout, Result, Shape, WgpuDevice};
 use std::sync::Arc;
@@ -51,12 +52,29 @@ impl QWgpuStorage {
     }
 
     pub fn dequantize(&self, elem_count: usize) -> Result<WgpuStorage> {
+        if gpu_dequant_supported(self.dtype) {
+            return dispatch_dequant_f32(
+                &self.device,
+                self.dtype,
+                &self.buffer,
+                elem_count,
+            )
+            .map_err(Into::into);
+        }
         let mut out = vec![0f32; elem_count];
         dequantize_to_f32(self, &mut out)?;
         WgpuStorage::from_cpu(&self.device, &CpuStorage::F32(out)).map_err(Into::into)
     }
 
     pub fn quantize(&mut self, src: &WgpuStorage) -> Result<()> {
+        if gpu_quant_supported(self.dtype) {
+            let elem_count = src.elem_count();
+            let layout = Layout::contiguous(&Shape::from(elem_count));
+            let buffer = dispatch_quant_f32(&self.device, self.dtype, src, &layout)?;
+            self.size_in_bytes = elem_count / self.dtype.block_size() * self.dtype.type_size();
+            self.buffer = buffer;
+            return Ok(());
+        }
         let src = src.to_cpu_storage()?;
         let elem_count = match &src {
             CpuStorage::F32(v) => v.len(),
@@ -138,7 +156,7 @@ impl QWgpuStorage {
         layout: &Layout,
     ) -> Result<(WgpuStorage, Shape)> {
         match self.dtype {
-            GgmlDType::Q4_0 | GgmlDType::Q8_0 | GgmlDType::Q4K => {
+            GgmlDType::Q4_0 | GgmlDType::Q5_0 | GgmlDType::Q8_0 | GgmlDType::Q4K => {
                 self.fwd_qmatmul(self_shape, storage, layout)
             }
             _ => self.fwd_via_cpu(self_shape, storage, layout),
@@ -179,6 +197,7 @@ impl QWgpuStorage {
 
         let out = match self.dtype {
             GgmlDType::Q4_0 => dispatch_qmatmul_q4_0(storage, &self.buffer, (1, m, n, k), layout)?,
+            GgmlDType::Q5_0 => dispatch_qmatmul_q5_0(storage, &self.buffer, (1, m, n, k), layout)?,
             GgmlDType::Q8_0 => dispatch_qmatmul_q8_0(storage, &self.buffer, (1, m, n, k), layout)?,
             GgmlDType::Q4K => dispatch_qmatmul_q4_k(storage, &self.buffer, (1, m, n, k), layout)?,
             other => crate::bail!("unsupported wgpu qmatmul dtype {other:?}"),

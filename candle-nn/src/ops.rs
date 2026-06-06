@@ -1268,10 +1268,7 @@ impl candle::CustomOp3 for Sdpa {
         v_l: &Layout,
     ) -> Result<(candle::WgpuStorage, Shape)> {
         if q.dtype() != DType::F32 || k.dtype() != DType::F32 || v.dtype() != DType::F32 {
-            candle::bail!("wgpu sdpa_vector only supports f32 q, k, v");
-        }
-        if self.mask.is_some() || self.do_causal {
-            candle::bail!("wgpu sdpa_vector does not support mask or causal attention yet");
+            candle::bail!("wgpu sdpa only supports f32 q, k, v");
         }
 
         let q_head = q_l.dim(D::Minus1)?;
@@ -1286,28 +1283,51 @@ impl candle::CustomOp3 for Sdpa {
         if q_l.dim(D::Minus(3))? % k_l.dim(D::Minus(3))? != 0 {
             candle::bail!("query `n_heads` must be a multiple of `n_kv_heads`");
         }
-        if q_seq > 8 {
-            candle::bail!(
-                "wgpu sdpa_vector supports q_seq <= 8 (prefill requires unfused path), got {q_seq}"
-            );
-        }
         if q_head != 64 && q_head != 128 {
-            candle::bail!("wgpu sdpa_vector supports head_dim 64 or 128, got {q_head}");
+            candle::bail!("wgpu sdpa supports head_dim 64 or 128, got {q_head}");
         }
         if q_seq > k_seq {
-            candle::bail!("wgpu sdpa_vector requires q_seq <= k_seq");
+            candle::bail!("wgpu sdpa requires q_seq <= k_seq");
         }
 
-        let out = candle::wgpu_device::dispatch_sdpa_vector_f32(
-            q,
-            k,
-            v,
-            q_l,
-            k_l,
-            v_l,
-            self.scale,
-            self.softcapping,
-        )?;
+        if self.mask.is_some() && q_seq > k_seq {
+            candle::bail!("wgpu sdpa mask requires q_seq <= k_seq");
+        }
+
+        let out = if let Some(mask_tensor) = &self.mask {
+            let (mask_s, mask_l) = mask_tensor.storage_and_layout();
+            let candle::Storage::Wgpu(mask_storage) = &*mask_s else {
+                candle::bail!("wgpu sdpa mask must be on wgpu device");
+            };
+            if mask_tensor.dtype() != DType::F32 {
+                candle::bail!("wgpu sdpa mask must be f32");
+            }
+            candle::wgpu_device::dispatch_sdpa_f32(
+                q,
+                k,
+                v,
+                q_l,
+                k_l,
+                v_l,
+                Some((mask_storage, mask_l)),
+                self.do_causal,
+                self.scale,
+                self.softcapping,
+            )?
+        } else {
+            candle::wgpu_device::dispatch_sdpa_f32(
+                q,
+                k,
+                v,
+                q_l,
+                k_l,
+                v_l,
+                None,
+                self.do_causal,
+                self.scale,
+                self.softcapping,
+            )?
+        };
         let out_dims = vec![q_l.dim(0)?, q_l.dim(1)?, q_l.dim(2)?, v_l.dim(3)?];
         Ok((out, Shape::from_dims(&out_dims)))
     }

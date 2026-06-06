@@ -38,14 +38,21 @@ var<storage, read> b_buf: array<f16>;
 @group(0) @binding(3)
 var<storage, read> mm_params: MatMulParams;
 
-fn mm_load_a(row: u32, col: u32) -> f16 {
-    return a_buf[row * mm_params.k + col];
+fn mm_elem_index(tensor_layout: TensorLayout, batch: u32, d1: u32, d2: u32) -> u32 {
+    if (tensor_layout.num_dims < 3u) {
+        return d1 * tensor_layout.strides[0] + d2 * tensor_layout.strides[1];
+    }
+    return batch * tensor_layout.strides[0] + d1 * tensor_layout.strides[1] + d2 * tensor_layout.strides[2];
 }
 
-fn mm_load_b(row: u32, col: u32) -> f16 {
-    return b_buf[row * mm_params.n + col];
+fn mm_load_a(batch: u32, row: u32, col: u32) -> f16 {
+    return a_buf[mm_elem_index(mm_params.a_layout, batch, row, col)];
 }
 
-fn mm_store_c(row: u32, col: u32, value: f16) {
-    c_buf[row * mm_params.n + col] = value;
+fn mm_load_b(batch: u32, row: u32, col: u32) -> f16 {
+    return b_buf[mm_elem_index(mm_params.b_layout, batch, row, col)];
+}
+
+fn mm_store_c(batch: u32, row: u32, col: u32, value: f16) {
+    c_buf[mm_elem_index(mm_params.c_layout, batch, row, col)] = value;
 }

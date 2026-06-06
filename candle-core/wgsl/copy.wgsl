@@ -17,11 +17,12 @@ fn copy_strided_f32(
     let dst_layout = kernel_params.out_layout;
 
     for (var i = gid.x; i < count; i = i + stride) {
-        let src_idx = if (is_contiguous(src_layout)) {
-            src_layout.offset + i
+        var src_idx: u32;
+        if (is_contiguous(src_layout)) {
+            src_idx = src_layout.offset + i;
         } else {
-            get_strided_index(i, src_layout)
-        };
+            src_idx = get_strided_index(i, src_layout);
+        }
         let value = input0_buf[src_idx];
         if (is_contiguous(dst_layout)) {
             output_buf[dst_layout.offset + i] = value;

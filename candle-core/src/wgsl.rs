@@ -66,6 +66,7 @@ pub const QMATMUL_Q4_K: &str = concat!(
 );
 pub const SOFTMAX: &str = include_str!("../wgsl/softmax.wgsl");
 pub const SDPA_VECTOR: &str = include_str!("../wgsl/sdpa_vector.wgsl");
+pub const SDPA_FULL: &str = include_str!("../wgsl/sdpa_full.wgsl");
 pub const UNARY_BF16: &str = concat!(
     include_str!("../wgsl/common_bf16.wgsl"),
     include_str!("../wgsl/unary_bf16.wgsl")
@@ -73,6 +74,47 @@ pub const UNARY_BF16: &str = concat!(
 pub const BINARY_BF16: &str = concat!(
     include_str!("../wgsl/common_bf16.wgsl"),
     include_str!("../wgsl/binary_bf16.wgsl")
+);
+pub const UNARY_F16: &str = concat!(
+    include_str!("../wgsl/common_f16.wgsl"),
+    include_str!("../wgsl/unary_f16.wgsl")
+);
+pub const BINARY_F16: &str = concat!(
+    include_str!("../wgsl/common_f16.wgsl"),
+    include_str!("../wgsl/binary_f16.wgsl")
+);
+pub const QMATMUL_Q5_0: &str = concat!(
+    include_str!("../wgsl/qmatmul_base.wgsl"),
+    include_str!("../wgsl/qmatmul_q5_0_blocks.wgsl"),
+    include_str!("../wgsl/qmatmul_q5_0.wgsl")
+);
+pub const DEQUANT_Q4_0: &str = concat!(
+    include_str!("../wgsl/dequant_base.wgsl"),
+    include_str!("../wgsl/dequant_q4_0.wgsl")
+);
+pub const DEQUANT_Q5_0: &str = concat!(
+    include_str!("../wgsl/dequant_base.wgsl"),
+    include_str!("../wgsl/dequant_q5_0.wgsl")
+);
+pub const DEQUANT_Q8_0: &str = concat!(
+    include_str!("../wgsl/dequant_base.wgsl"),
+    include_str!("../wgsl/dequant_q8_0.wgsl")
+);
+pub const DEQUANT_Q4_K: &str = concat!(
+    include_str!("../wgsl/dequant_base.wgsl"),
+    include_str!("../wgsl/dequant_q4_k.wgsl")
+);
+pub const QUANT_Q4_0: &str = concat!(
+    include_str!("../wgsl/quant_base.wgsl"),
+    include_str!("../wgsl/quant_q4_0.wgsl")
+);
+pub const QUANT_Q5_0: &str = concat!(
+    include_str!("../wgsl/quant_base.wgsl"),
+    include_str!("../wgsl/quant_q5_0.wgsl")
+);
+pub const QUANT_Q8_0: &str = concat!(
+    include_str!("../wgsl/quant_base.wgsl"),
+    include_str!("../wgsl/quant_q8_0.wgsl")
 );
 
 /// Inner-loop vector width for tiled matmul kernels.
@@ -83,6 +125,14 @@ pub const COPY2D: &str = include_str!("../wgsl/copy2d.wgsl");
 pub const RMS_NORM: &str = include_str!("../wgsl/rms_norm.wgsl");
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
 pub const WHERE_COND: &str = include_str!("../wgsl/where_cond.wgsl");
+pub const IM2COL2D: &str = include_str!("../wgsl/im2col2d.wgsl");
+pub const IM2COL1D: &str = include_str!("../wgsl/im2col1d.wgsl");
+pub const POOL2D: &str = include_str!("../wgsl/pool2d.wgsl");
+pub const UPSAMPLE_NEAREST1D: &str = include_str!("../wgsl/upsample_nearest1d.wgsl");
+pub const UPSAMPLE_NEAREST2D: &str = include_str!("../wgsl/upsample_nearest2d.wgsl");
+pub const UPSAMPLE_BILINEAR2D: &str = include_str!("../wgsl/upsample_bilinear2d.wgsl");
+pub const CONV_TRANSPOSE2D: &str = include_str!("../wgsl/conv_transpose2d.wgsl");
+pub const CONV_TRANSPOSE1D: &str = include_str!("../wgsl/conv_transpose1d.wgsl");
 
 #[cfg(test)]
 mod tests {
@@ -103,15 +153,39 @@ mod tests {
         assert!(MATMUL_TILED_F16.contains("fn matmul_tiled_f16"));
         assert!(MATMUL_TILED_F16.contains("fn matmul_tiled_vec_f16"));
         assert!(QMATMUL_Q4_0.contains("fn qmatmul_q4_0_f32"));
+        assert!(QMATMUL_Q5_0.contains("fn qmatmul_q5_0_f32"));
+        assert!(UNARY_F16.contains("fn gelu_f16"));
+        assert!(BINARY_F16.contains("fn add_f16"));
         assert!(QMATMUL_Q8_0.contains("fn qmatmul_q8_0_f32"));
         assert!(QMATMUL_Q4_K.contains("fn qmatmul_q4_k_f32"));
         assert!(SOFTMAX.contains("fn softmax_last_dim_f32"));
         assert!(SDPA_VECTOR.contains("fn sdpa_vector_f32"));
+        assert!(SDPA_FULL.contains("fn sdpa_full_f32"));
         assert!(MATMUL_TILED_BF16.contains("fn matmul_tiled_bf16"));
         assert!(UNARY_BF16.contains("fn gelu_bf16"));
+        assert!(UNARY_BF16.contains("fn silu_bf16"));
+        assert!(UNARY_BF16.contains("fn affine_bf16"));
         assert!(BINARY_BF16.contains("fn add_bf16"));
+        assert!(BINARY_BF16.contains("fn mul_bf16"));
+        assert!(BINARY_BF16.contains("fn min_bf16"));
         assert!(CAST.contains("fn cast_f16_f32"));
         assert!(CAST.contains("fn f32_from_bf16_bits"));
+        assert!(DEQUANT_Q4_0.contains("fn dequant_q4_0_f32"));
+        assert!(DEQUANT_Q5_0.contains("fn dequant_q5_0_f32"));
+        assert!(DEQUANT_Q8_0.contains("fn dequant_q8_0_f32"));
+        assert!(DEQUANT_Q4_K.contains("fn dequant_q4_k_f32"));
+        assert!(QUANT_Q4_0.contains("fn quant_q4_0_f32"));
+        assert!(QUANT_Q5_0.contains("fn quant_q5_0_f32"));
+        assert!(QUANT_Q8_0.contains("fn quant_q8_0_f32"));
+        assert!(IM2COL2D.contains("fn im2col2d_f32"));
+        assert!(IM2COL1D.contains("fn im2col1d_f32"));
+        assert!(POOL2D.contains("fn avg_pool2d_f32"));
+        assert!(POOL2D.contains("fn max_pool2d_f32"));
+        assert!(UPSAMPLE_NEAREST1D.contains("fn upsample_nearest1d_f32"));
+        assert!(UPSAMPLE_NEAREST2D.contains("fn upsample_nearest2d_f32"));
+        assert!(UPSAMPLE_BILINEAR2D.contains("fn upsample_bilinear2d_f32"));
+        assert!(CONV_TRANSPOSE2D.contains("fn conv_transpose2d_f32"));
+        assert!(CONV_TRANSPOSE1D.contains("fn conv_transpose1d_f32"));
     }
 
     #[test]

@@ -1,8 +1,9 @@
-// Fused scaled dot-product attention (decode / vector path, f32).
+// Fused scaled dot-product attention (prefill / full path, f32).
 //
-// Entry point: sdpa_vector_f32
+// Entry point: sdpa_full_f32
 //
-// Constraints (enforced in Rust): q_seq <= 8, head_dim in {64, 128}, contiguous tensors.
+// One workgroup per (batch, q_head, q_position). Supports arbitrary q_seq,
+// optional additive mask, and causal masking.
 
 struct SdpaParams {
     bs: u32,
@@ -34,6 +35,9 @@ var<storage, read> k_buf: array<f32>;
 var<storage, read> v_buf: array<f32>;
 
 @group(0) @binding(4)
+var<storage, read> mask_buf: array<f32>;
+
+@group(0) @binding(5)
 var<storage, read> sdpa_params: SdpaParams;
 
 fn bitcast_f32(bits: u32) -> f32 {
@@ -62,8 +66,28 @@ fn out_index(bs_i: u32, qh: u32, qs: u32, d: u32) -> u32 {
     return ((bs_i * nqh + qh) * qsh + qs) * vd + d;
 }
 
+fn mask_index(bs_i: u32, qh: u32, qs: u32, ki: u32) -> u32 {
+    let ksh = sdpa_params.k_seq;
+    let qsh = sdpa_params.q_seq;
+    let nqh = sdpa_params.n_q_heads;
+    return ((bs_i * nqh + qh) * qsh + qs) * ksh + ki;
+}
+
+fn is_masked(bs_i: u32, qh: u32, qs: u32, ki: u32) -> bool {
+    if (sdpa_params.do_causal != 0u && ki > qs + sdpa_params.ql_off) {
+        return true;
+    }
+    if (sdpa_params.has_mask != 0u) {
+        let m = mask_buf[mask_index(bs_i, qh, qs, ki)];
+        if (m < -1e30) {
+            return true;
+        }
+    }
+    return false;
+}
+
 @compute @workgroup_size(1)
-fn sdpa_vector_f32(@builtin(workgroup_id) wg_id: vec3<u32>) {
+fn sdpa_full_f32(@builtin(workgroup_id) wg_id: vec3<u32>) {
     let flat = wg_id.x;
     let q_seq = sdpa_params.q_seq;
     let n_q_heads = sdpa_params.n_q_heads;
@@ -97,6 +121,10 @@ fn sdpa_vector_f32(@builtin(workgroup_id) wg_id: vec3<u32>) {
     }
 
     for (var ki = 0u; ki < k_seq; ki = ki + 1u) {
+        if (is_masked(bs_i, qh, qs, ki)) {
+            continue;
+        }
+
         var score = 0.0;
         for (var d = 0u; d < head_dim; d = d + 1u) {
             let qv = q_buf[q_index(bs_i, qh, qs, d)];
@@ -106,6 +134,9 @@ fn sdpa_vector_f32(@builtin(workgroup_id) wg_id: vec3<u32>) {
         score = score * scale;
         if (softcapping != 1.0) {
             score = tanh(score) * softcapping;
+        }
+        if (sdpa_params.has_mask != 0u) {
+            score += mask_buf[mask_index(bs_i, qh, qs, ki)];
         }
 
         let new_max = max(max_score, score);
@@ -120,7 +151,7 @@ fn sdpa_vector_f32(@builtin(workgroup_id) wg_id: vec3<u32>) {
         }
     }
 
-    let inv_sum = 1.0 / sum_exp;
+    let inv_sum = select(0.0, 1.0 / sum_exp, sum_exp > 0.0);
     for (var d = 0u; d < v_dim; d = d + 1u) {
         out_buf[out_index(bs_i, qh, qs, d)] = acc[d] * inv_sum;
     }

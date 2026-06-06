@@ -35,6 +35,7 @@ fn matmul_tiled_vec_f32(
     let m = mm_params.m;
     let n = mm_params.n;
     let k_dim = mm_params.k;
+    let batch = wg_id.z;
 
     let row = wg_id.y * TILE + local_id.y;
     let col = wg_id.x * TILE + local_id.x;
@@ -50,14 +51,14 @@ fn matmul_tiled_vec_f32(
 
         let a_row = wg_id.y * TILE + ty;
         if (a_row < m && a_col < k_dim) {
-            tile_a[ty * TILE + tx] = mm_load_a(a_row, a_col);
+            tile_a[ty * TILE + tx] = mm_load_a(batch, a_row, a_col);
         } else {
             tile_a[ty * TILE + tx] = 0.0;
         }
 
         let b_col = wg_id.x * TILE + tx;
         if (b_row < k_dim && b_col < n) {
-            tile_b[ty * TILE + tx] = mm_load_b(b_row, b_col);
+            tile_b[ty * TILE + tx] = mm_load_b(batch, b_row, b_col);
         } else {
             tile_b[ty * TILE + tx] = 0.0;
         }
@@ -72,6 +73,6 @@ fn matmul_tiled_vec_f32(
     }
 
     if (row < m && col < n) {
-        mm_store_c(row, col, acc);
+        mm_store_c(batch, row, col, acc);
     }
 }

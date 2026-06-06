@@ -495,70 +495,82 @@ impl BackendStorage for WgpuStorage {
 
     fn conv1d(
         &self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: &crate::conv::ParamsConv1D,
+        layout: &Layout,
+        kernel: &Self,
+        kernel_l: &Layout,
+        params: &crate::conv::ParamsConv1D,
     ) -> CandleResult<Self> {
-        wgpu_not_impl!("conv1d")
+        super::conv::conv1d(self, layout, kernel, kernel_l, params)
     }
 
     fn conv_transpose1d(
         &self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: &crate::conv::ParamsConvTranspose1D,
+        layout: &Layout,
+        kernel: &Self,
+        kernel_l: &Layout,
+        params: &crate::conv::ParamsConvTranspose1D,
     ) -> CandleResult<Self> {
-        wgpu_not_impl!("conv_transpose1d")
+        super::conv::conv_transpose1d(self, layout, kernel, kernel_l, params)
     }
 
     fn conv2d(
         &self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: &crate::conv::ParamsConv2D,
+        layout: &Layout,
+        kernel: &Self,
+        kernel_l: &Layout,
+        params: &crate::conv::ParamsConv2D,
     ) -> CandleResult<Self> {
-        wgpu_not_impl!("conv2d")
+        super::conv::conv2d(self, layout, kernel, kernel_l, params)
     }
 
     fn conv_transpose2d(
         &self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: &crate::conv::ParamsConvTranspose2D,
+        layout: &Layout,
+        kernel: &Self,
+        kernel_l: &Layout,
+        params: &crate::conv::ParamsConvTranspose2D,
     ) -> CandleResult<Self> {
-        wgpu_not_impl!("conv_transpose2d")
+        super::conv::conv_transpose2d(self, layout, kernel, kernel_l, params)
     }
 
-    fn avg_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> CandleResult<Self> {
-        wgpu_not_impl!("avg_pool2d")
+    fn avg_pool2d(
+        &self,
+        layout: &Layout,
+        kernel_size: (usize, usize),
+        stride: (usize, usize),
+    ) -> CandleResult<Self> {
+        super::conv::avg_pool2d(self, layout, kernel_size, stride)
     }
 
-    fn max_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> CandleResult<Self> {
-        wgpu_not_impl!("max_pool2d")
+    fn max_pool2d(
+        &self,
+        layout: &Layout,
+        kernel_size: (usize, usize),
+        stride: (usize, usize),
+    ) -> CandleResult<Self> {
+        super::conv::max_pool2d(self, layout, kernel_size, stride)
     }
 
-    fn upsample_nearest1d(&self, _: &Layout, _: usize) -> CandleResult<Self> {
-        wgpu_not_impl!("upsample_nearest1d")
+    fn upsample_nearest1d(&self, layout: &Layout, sz: usize) -> CandleResult<Self> {
+        super::conv::upsample_nearest1d(self, layout, sz)
     }
 
-    fn upsample_nearest2d(&self, _: &Layout, _: usize, _: usize) -> CandleResult<Self> {
-        wgpu_not_impl!("upsample_nearest2d")
+    fn upsample_nearest2d(&self, layout: &Layout, h: usize, w: usize) -> CandleResult<Self> {
+        super::conv::upsample_nearest2d(self, layout, h, w)
     }
 
     fn upsample_bilinear2d(
         &self,
-        _: &Layout,
-        _: usize,
-        _: usize,
-        _: bool,
-        _: Option<f64>,
-        _: Option<f64>,
+        layout: &Layout,
+        h: usize,
+        w: usize,
+        align_corners: bool,
+        scale_h: Option<f64>,
+        scale_w: Option<f64>,
     ) -> CandleResult<Self> {
-        wgpu_not_impl!("upsample_bilinear2d")
+        super::conv::upsample_bilinear2d(
+            self, layout, h, w, align_corners, scale_h, scale_w,
+        )
     }
 
     fn gather(&self, _: &Layout, _: &Self, _: &Layout, _: usize) -> CandleResult<Self> {

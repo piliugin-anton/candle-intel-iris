@@ -686,6 +686,187 @@ impl ExtendedBindGroupBuilder {
     }
 }
 
+/// Bind group layout for SDPA kernels with an optional additive mask buffer.
+#[derive(Clone)]
+pub struct SdpaBindGroupLayout {
+    inner: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
+}
+
+impl std::fmt::Debug for SdpaBindGroupLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SdpaBindGroupLayout")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for SdpaBindGroupLayout {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SdpaBindGroupLayout {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn get_or_create(&self, device: &wgpu::Device) -> Result<wgpu::BindGroupLayout> {
+        {
+            let guard = self.inner.read()?;
+            if let Some(layout) = guard.as_ref() {
+                return Ok(layout.clone());
+            }
+        }
+
+        let storage_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: if read_only {
+                    wgpu::BufferBindingType::Storage { read_only: true }
+                } else {
+                    wgpu::BufferBindingType::Storage { read_only: false }
+                },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("candle sdpa kernel bind group layout"),
+            entries: &[
+                storage_entry(0, false),
+                storage_entry(1, true),
+                storage_entry(2, true),
+                storage_entry(3, true),
+                storage_entry(4, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(STANDARD_UNIFORM_MIN_BINDING),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let mut guard = self.inner.write()?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        guard.replace(layout.clone());
+        Ok(layout)
+    }
+}
+
+/// Arguments for building an SDPA kernel bind group (q, k, v, optional mask).
+pub struct SdpaBindGroupArgs<'a> {
+    pub output: BufferOffset<'a>,
+    pub q: BufferOffset<'a>,
+    pub k: BufferOffset<'a>,
+    pub v: BufferOffset<'a>,
+    pub mask: BufferOffset<'a>,
+    pub uniform_bytes: &'a [u8],
+}
+
+#[derive(Clone)]
+pub struct SdpaBindGroupBuilder {
+    layout: SdpaBindGroupLayout,
+}
+
+impl std::fmt::Debug for SdpaBindGroupBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SdpaBindGroupBuilder")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for SdpaBindGroupBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SdpaBindGroupBuilder {
+    pub fn new() -> Self {
+        Self {
+            layout: SdpaBindGroupLayout::new(),
+        }
+    }
+
+    pub fn bind_group_layout(&self) -> &SdpaBindGroupLayout {
+        &self.layout
+    }
+
+    pub fn create_bind_group(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        args: SdpaBindGroupArgs<'_>,
+    ) -> Result<wgpu::BindGroup> {
+        let layout = self.layout.get_or_create(device)?;
+        let uniform_buffer =
+            BindGroupBuilder::create_uniform_buffer_bytes(device, queue, args.uniform_bytes);
+
+        Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("candle sdpa kernel bind group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: args.output.buffer,
+                        offset: args.output.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: args.q.buffer,
+                        offset: args.q.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: args.k.buffer,
+                        offset: args.k.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: args.v.buffer,
+                        offset: args.v.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: args.mask.buffer,
+                        offset: args.mask.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        }))
+    }
+}
+
 macro_rules! fixed_uniform {
     ($name:ident { $($field:ident : $ty:ty),* $(,)? } pad $pad:expr) => {
         #[repr(C)]
@@ -740,6 +921,14 @@ fixed_uniform!(SoftmaxUniforms {
     last_dim: u32,
 } pad 70);
 
+fixed_uniform!(DequantUniforms {
+    elem_count: u32,
+} pad 71);
+
+fixed_uniform!(QuantUniforms {
+    elem_count: u32,
+} pad 71);
+
 fixed_uniform!(SdpaUniforms {
     bs: u32,
     n_q_heads: u32,
@@ -751,7 +940,122 @@ fixed_uniform!(SdpaUniforms {
     gqa_factor: u32,
     scale_bits: u32,
     softcapping_bits: u32,
-} pad 62);
+    has_mask: u32,
+    do_causal: u32,
+    ql_off: u32,
+} pad 59);
+
+macro_rules! layout_uniform {
+    ($name:ident { $($field:ident : $ty:ty),* $(,)? } pad $pad:expr) => {
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub struct $name {
+            $(pub $field: $ty,)*
+            pub _pad: [u32; $pad],
+        }
+
+        impl $name {
+            pub fn as_bytes(&self) -> &[u8] {
+                debug_assert_eq!(std::mem::size_of::<Self>(), STANDARD_UNIFORM_SIZE);
+                // SAFETY: `Self` is `#[repr(C)]` with fixed size `STANDARD_UNIFORM_SIZE`.
+                unsafe {
+                    std::slice::from_raw_parts(
+                        (self as *const Self).cast(),
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    };
+}
+
+layout_uniform!(Im2col2dUniforms {
+    dst_numel: u32,
+    h_out: u32,
+    w_out: u32,
+    h_k: u32,
+    w_k: u32,
+    stride: u32,
+    padding: u32,
+    dilation: u32,
+    src_layout: TensorLayoutUniform,
+} pad 44);
+
+layout_uniform!(Im2col1dUniforms {
+    dst_numel: u32,
+    l_out: u32,
+    l_k: u32,
+    stride: u32,
+    padding: u32,
+    dilation: u32,
+    _align: [u32; 2],
+    src_layout: TensorLayoutUniform,
+} pad 44);
+
+layout_uniform!(Pool2dUniforms {
+    k_h: u32,
+    k_w: u32,
+    s_h: u32,
+    s_w: u32,
+    dst_numel: u32,
+    _align: [u32; 3],
+    src_layout: TensorLayoutUniform,
+} pad 44);
+
+layout_uniform!(UpsampleNearest1dUniforms {
+    dst_sz: u32,
+    scale_bits: u32,
+    dst_numel: u32,
+    _align: u32,
+    src_layout: TensorLayoutUniform,
+} pad 48);
+
+layout_uniform!(UpsampleNearest2dUniforms {
+    dst_h: u32,
+    dst_w: u32,
+    scale_h_bits: u32,
+    scale_w_bits: u32,
+    dst_numel: u32,
+    _align: [u32; 3],
+    src_layout: TensorLayoutUniform,
+} pad 44);
+
+layout_uniform!(UpsampleBilinear2dUniforms {
+    dst_h: u32,
+    dst_w: u32,
+    align_corners: u32,
+    has_scale_h: u32,
+    scale_h_bits: u32,
+    has_scale_w: u32,
+    scale_w_bits: u32,
+    dst_numel: u32,
+    src_layout: TensorLayoutUniform,
+} pad 44);
+
+layout_uniform!(ConvTranspose2dUniforms {
+    w_out: u32,
+    h_out: u32,
+    stride: u32,
+    padding: u32,
+    output_padding: u32,
+    dilation: u32,
+    dst_numel: u32,
+    _align: u32,
+    src_layout: TensorLayoutUniform,
+    kernel_layout: TensorLayoutUniform,
+} pad 24);
+
+layout_uniform!(ConvTranspose1dUniforms {
+    l_out: u32,
+    stride: u32,
+    padding: u32,
+    output_padding: u32,
+    dilation: u32,
+    dst_numel: u32,
+    _align: [u32; 2],
+    src_layout: TensorLayoutUniform,
+    kernel_layout: TensorLayoutUniform,
+} pad 24);
 
 #[cfg(test)]
 mod tests {
@@ -773,6 +1077,14 @@ mod tests {
         assert_eq!(std::mem::size_of::<MatMulUniforms>(), STANDARD_UNIFORM_SIZE);
         assert_eq!(std::mem::size_of::<QMatMulUniforms>(), STANDARD_UNIFORM_SIZE);
         assert_eq!(std::mem::size_of::<ReduceUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<Im2col2dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<Im2col1dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<Pool2dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<UpsampleNearest1dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<UpsampleNearest2dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<UpsampleBilinear2dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<ConvTranspose2dUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<ConvTranspose1dUniforms>(), STANDARD_UNIFORM_SIZE);
     }
 
     #[test]
