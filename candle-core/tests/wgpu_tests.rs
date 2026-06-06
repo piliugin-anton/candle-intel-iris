@@ -546,6 +546,52 @@ fn parity_rms_norm_f16() -> Result<()> {
 
 #[test]
 #[ignore = "requires GPU with wgpu backend"]
+fn parity_layer_norm_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs = Tensor::rand(-1.0f32, 1.0f32, (2, 4, 8), &cpu)?;
+    let alpha = Tensor::ones(8, DType::F32, &cpu)?;
+    let beta = Tensor::zeros(8, DType::F32, &cpu)?;
+    let cpu_out = candle_nn::ops::layer_norm(&xs, &alpha, &beta, 1e-5)?;
+    let gpu_out = candle_nn::ops::layer_norm(
+        &xs.to_device(&gpu)?,
+        &alpha.to_device(&gpu)?,
+        &beta.to_device(&gpu)?,
+        1e-5,
+    )?;
+    assert_parity(&cpu_out, &gpu_out)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_arg_sort_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs = Tensor::new(&[3.0f32, 1.0, 2.0, 0.5, 4.0, 1.5], &cpu)?.reshape((2, 3))?;
+    let cpu_out = xs.arg_sort_last_dim(true)?;
+    let gpu_out = xs.to_device(&gpu)?.arg_sort_last_dim(true)?;
+    assert_eq!(
+        cpu_out.to_vec1::<u32>()?,
+        gpu_out.to_vec1::<u32>()?,
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sigmoid_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs = Tensor::rand(-2.0f32, 2.0f32, (2, 8), &cpu)?;
+    let cpu_out = candle_nn::ops::sigmoid(&xs)?;
+    let gpu_out = candle_nn::ops::sigmoid(&xs.to_device(&gpu)?)?;
+    assert_parity(&cpu_out, &gpu_out)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
 fn parity_rms_norm_bf16() -> Result<()> {
     let gpu = wgpu_device()?;
     let cpu = Device::Cpu;

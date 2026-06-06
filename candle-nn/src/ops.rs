@@ -203,6 +203,16 @@ impl candle::CustomOp1 for Sigmoid {
         Ok((new_storage, layout.shape().clone()))
     }
 
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        storage: &candle::WgpuStorage,
+        layout: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        let out = candle::wgpu_device::dispatch_sigmoid(storage, layout)?;
+        Ok((out, layout.shape().clone()))
+    }
+
     fn bwd(&self, _arg: &Tensor, res: &Tensor, grad_res: &Tensor) -> Result<Option<Tensor>> {
         // d/dx sigmoid(x) = (1 - sigmoid(x)) * sigmoid(x)
         let d_dx_sigmoid = res.ones_like()?.sub(res)?.mul(res)?;
@@ -891,6 +901,23 @@ impl candle::CustomOp3 for LayerNorm {
         .map_err(candle::Error::wrap)?;
         let newstorage = candle::MetalStorage::new(output, device.clone(), elem_count, s1.dtype());
         Ok((newstorage, l1.shape().clone()))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        s1: &candle::WgpuStorage,
+        l1: &Layout,
+        s2: &candle::WgpuStorage,
+        l2: &Layout,
+        s3: &candle::WgpuStorage,
+        l3: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        if !(l1.is_contiguous() && l2.is_contiguous() && l3.is_contiguous()) {
+            candle::bail!("Non contiguous layernorm is not implemented");
+        }
+        let out = candle::wgpu_device::dispatch_layer_norm(s1, s2, s3, l1, l2, l3, self.eps)?;
+        Ok((out, l1.shape().clone()))
     }
 }
 

@@ -3,7 +3,7 @@
 use candle::cuda_backend::kernels::ffi;
 #[allow(unused_imports)]
 use candle::quantized::{self, QTensor};
-use candle::{Result, Tensor};
+use candle::{DType, Result, Tensor};
 
 #[cfg(feature = "cuda")]
 pub fn moe_gemm(
@@ -153,15 +153,26 @@ pub fn moe_gemm(
 
 #[cfg(not(feature = "cuda"))]
 pub fn moe_gemm(
-    _: &Tensor,
-    _: &Tensor,
-    _: &Option<Tensor>,
-    _: &Tensor,
-    _: &Tensor,
-    _: usize,
-    _: bool,
+    input: &Tensor,
+    weights: &Tensor,
+    topk_weights: &Option<Tensor>,
+    sorted_token_ids: &Tensor,
+    expert_ids: &Tensor,
+    topk: usize,
+    _is_prefill: bool,
 ) -> Result<Tensor> {
-    candle::bail!("moe_gemm is only implemented for the cuda backend")
+    match input.dtype() {
+        DType::F16 | DType::BF16 | DType::F32 => {}
+        dt => candle::bail!("moe_gemm reference path unsupported dtype {dt:?}"),
+    }
+    crate::moe_reference::moe_gemm_reference(
+        input,
+        weights,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        topk,
+    )
 }
 
 #[cfg(feature = "cuda")]
@@ -339,14 +350,23 @@ pub fn moe_gemm_gguf(
 #[cfg(not(feature = "cuda"))]
 #[allow(clippy::too_many_arguments)]
 pub fn moe_gemm_gguf(
-    _: &Tensor,
-    _: &QTensor,
-    _: &Option<Tensor>,
-    _: &Tensor,
-    _: &Tensor,
-    _: usize,
-    _: bool,
-    _: candle::DType,
+    input: &Tensor,
+    weights: &QTensor,
+    topk_weights: &Option<Tensor>,
+    sorted_token_ids: &Tensor,
+    expert_ids: &Tensor,
+    topk: usize,
+    is_prefill: bool,
+    dtype: candle::DType,
 ) -> Result<Tensor> {
-    candle::bail!("moe_gemm_gguf is only implemented for the cuda backend")
+    crate::moe_reference::moe_gemm_gguf_reference(
+        input,
+        weights,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        topk,
+        is_prefill,
+        dtype,
+    )
 }

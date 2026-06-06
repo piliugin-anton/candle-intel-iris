@@ -1,7 +1,7 @@
 use super::bind_group::{
     BindGroupBuilder, Copy2dUniforms, DequantUniforms, KernelUniforms, MatMulUniforms,
-    QMatMulUniforms, QuantUniforms, ReduceUniforms, RmsNormUniforms, RopeUniforms, SdpaUniforms,
-    SoftmaxUniforms, WhereUniforms,
+    QMatMulUniforms, QuantUniforms, ReduceUniforms, RmsNormUniforms, RopeIUniforms,
+    RopeThdUniforms, RopeUniforms, SdpaUniforms, SoftmaxUniforms, WhereUniforms,
 };
 use super::error::{Result, WgpuError};
 use super::intel_caps::{tune_matmul_shader_source, IntelGeneration};
@@ -16,8 +16,10 @@ use crate::wgsl::{
     DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0, DEQUANT_Q8_0, MATMUL_NAIVE, MATMUL_TILED,
     MATMUL_TILED_BF16, MATMUL_TILED_F16, MATMUL_TILED_VEC, MATMUL_VEC_WIDTH,
     QMATMUL_Q4_0, QMATMUL_Q4_K, QMATMUL_Q5_0, QMATMUL_Q8_0, QUANT_Q4_0, QUANT_Q5_0, QUANT_Q8_0,
+    LAYER_NORM, LAYER_NORM_BF16, LAYER_NORM_F16,
     REDUCE, REDUCE_BF16, REDUCE_F16, RMS_NORM, RMS_NORM_BF16, RMS_NORM_F16, ROPE, ROPE_BF16,
-    ROPE_F16, SDPA_FULL, SDPA_FULL_BF16, SDPA_FULL_F16, SDPA_VECTOR, SDPA_VECTOR_BF16,
+    ROPE_F16, ROPE_I, ROPE_I_BF16, ROPE_I_F16, ROPE_THD, ROPE_THD_BF16, ROPE_THD_F16, SDPA_FULL,
+    SDPA_FULL_BF16, SDPA_FULL_F16, SDPA_VECTOR, SDPA_VECTOR_BF16,
     SDPA_VECTOR_F16, SOFTMAX, SOFTMAX_BF16, SOFTMAX_F16, UNARY,
     UNARY_BF16, UNARY_F16, WHERE_COND,
 };
@@ -1562,11 +1564,35 @@ fn rms_norm_shader(dtype: DType) -> (&'static str, &'static str) {
     }
 }
 
+fn layer_norm_shader(dtype: DType) -> (&'static str, &'static str) {
+    match dtype {
+        DType::F16 => (LAYER_NORM_F16, "layer_norm_f16"),
+        DType::BF16 => (LAYER_NORM_BF16, "layer_norm_bf16"),
+        _ => (LAYER_NORM, "layer_norm_f32"),
+    }
+}
+
 fn rope_shader(dtype: DType) -> (&'static str, &'static str) {
     match dtype {
         DType::F16 => (ROPE_F16, "rope_f16"),
         DType::BF16 => (ROPE_BF16, "rope_bf16"),
         _ => (ROPE, "rope_f32"),
+    }
+}
+
+fn rope_i_shader(dtype: DType) -> (&'static str, &'static str) {
+    match dtype {
+        DType::F16 => (ROPE_I_F16, "rope_i_f16"),
+        DType::BF16 => (ROPE_I_BF16, "rope_i_bf16"),
+        _ => (ROPE_I, "rope_i_f32"),
+    }
+}
+
+fn rope_thd_shader(dtype: DType) -> (&'static str, &'static str) {
+    match dtype {
+        DType::F16 => (ROPE_THD_F16, "rope_thd_f16"),
+        DType::BF16 => (ROPE_THD_BF16, "rope_thd_bf16"),
+        _ => (ROPE_THD, "rope_thd_f32"),
     }
 }
 
@@ -1646,6 +1672,172 @@ pub fn dispatch_rms_norm_f32(
     dispatch_rms_norm(x, alpha, x_layout, alpha_layout, eps)
 }
 
+/// Layer normalization with dtype-native kernels (f32 / f16 / bf16).
+pub fn dispatch_layer_norm(
+    x: &WgpuStorage,
+    alpha: &WgpuStorage,
+    beta: &WgpuStorage,
+    x_layout: &Layout,
+    alpha_layout: &Layout,
+    beta_layout: &Layout,
+    eps: f32,
+) -> CandleResult<WgpuStorage> {
+    let dtype = x.dtype();
+    require_float(dtype, "layer_norm")?;
+    if alpha.dtype() != dtype || beta.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "layer_norm alpha/beta dtype must match x {dtype:?}, got alpha={:?} beta={:?}",
+            alpha.dtype(),
+            beta.dtype()
+        )));
+    }
+    if !(x_layout.is_contiguous() && alpha_layout.is_contiguous() && beta_layout.is_contiguous()) {
+        return Err(Error::Msg("Non contiguous layer_norm is not implemented".into()).bt());
+    }
+    let device = x.device();
+    let dims = x_layout.dims();
+    let n_cols = *dims
+        .last()
+        .ok_or_else(|| Error::Msg("empty tensor in layer_norm".into()))?;
+    let n_rows = x_layout.shape().elem_count() / n_cols;
+    let out = WgpuStorage::alloc(device, x_layout.shape(), dtype).map_err(Error::from)?;
+    let out_layout = Layout::contiguous(x_layout.shape());
+    let uniforms = RmsNormUniforms {
+        n_rows: n_rows as u32,
+        n_cols: n_cols as u32,
+        eps_bits: eps.to_bits(),
+        _pad: [0; 69],
+    };
+    let (shader, entry) = layer_norm_shader(dtype);
+    let kernel =
+        WgpuKernel::compile_extended(device, shader, entry, 32).map_err(Error::from)?;
+    let bind_group = kernel
+        .create_extended_bind_group(
+            device,
+            buffer_offset(&out, &out_layout),
+            buffer_offset(x, x_layout),
+            buffer_offset(alpha, alpha_layout),
+            buffer_offset(beta, beta_layout),
+            uniforms.as_bytes(),
+        )
+        .map_err(Error::from)?;
+    x.backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [n_rows as u32, 1, 1]))
+        .map_err(Error::from)?;
+    Ok(out)
+}
+
+/// Layer normalization (f32). Prefer [`dispatch_layer_norm`] for dtype-aware dispatch.
+pub fn dispatch_layer_norm_f32(
+    x: &WgpuStorage,
+    alpha: &WgpuStorage,
+    beta: &WgpuStorage,
+    x_layout: &Layout,
+    alpha_layout: &Layout,
+    beta_layout: &Layout,
+    eps: f32,
+) -> CandleResult<WgpuStorage> {
+    dispatch_layer_norm(x, alpha, beta, x_layout, alpha_layout, beta_layout, eps)
+}
+
+/// Sigmoid activation using dtype-native unary kernels.
+pub fn dispatch_sigmoid(storage: &WgpuStorage, layout: &Layout) -> CandleResult<WgpuStorage> {
+    dispatch_unary_kernel(storage, layout, "usigmoid", "sigmoid")
+}
+
+fn dispatch_unary_kernel(
+    storage: &WgpuStorage,
+    layout: &Layout,
+    kernel: &str,
+    op: &'static str,
+) -> CandleResult<WgpuStorage> {
+    let dtype = storage.dtype();
+    let device = storage.device().clone();
+    if dtype == DType::BF16 {
+        if device.caps().supports_native_bf16() {
+            let entry = unary_entry_point_bf16(kernel).ok_or_else(|| {
+                WgpuError::Message(format!("wgpu bf16 unary kernel not available for op {op}"))
+            })?;
+            let out_shape = layout.shape();
+            let out = WgpuStorage::alloc(&device, out_shape, DType::BF16)?;
+            let out_layout = Layout::contiguous(out_shape);
+            let uniforms = KernelUniforms::new(
+                out_layout.shape().elem_count(),
+                &out_layout,
+                layout,
+                None,
+            );
+            dispatch_elemwise_bf16(ElemwiseBf16Dispatch {
+                device: &device,
+                source: UNARY_BF16,
+                entry_point: entry,
+                out: &out,
+                out_layout: &out_layout,
+                in0: storage,
+                in0_layout: layout,
+                in1: None,
+                backing: storage.backing(),
+                uniforms,
+            })
+            .map_err(Error::from)?;
+            return Ok(out);
+        }
+        let f32 = storage.to_dtype(layout, DType::F32)?;
+        let f32_layout = Layout::contiguous(layout.shape());
+        let out_f32 = dispatch_unary_kernel(&f32, &f32_layout, kernel, op)?;
+        return out_f32.to_dtype(layout, DType::BF16);
+    }
+
+    if dtype == DType::F16 {
+        if device.caps().supports_native_f16() {
+            let entry = unary_entry_point_f16(kernel).ok_or_else(|| {
+                WgpuError::Message(format!("wgpu f16 unary kernel not available for op {op}"))
+            })?;
+            let out_shape = layout.shape();
+            let out = WgpuStorage::alloc(&device, out_shape, DType::F16)?;
+            let out_layout = Layout::contiguous(out_shape);
+            dispatch_elemwise(ElemwiseDispatch {
+                device: &device,
+                source: UNARY_F16,
+                entry_point: entry,
+                out: &out,
+                out_layout: &out_layout,
+                in0: storage,
+                in0_layout: layout,
+                in1: None,
+                backing: storage.backing(),
+            })
+            .map_err(Error::from)?;
+            return Ok(out);
+        }
+        let f32 = storage.to_dtype(layout, DType::F32)?;
+        let f32_layout = Layout::contiguous(layout.shape());
+        let out_f32 = dispatch_unary_kernel(&f32, &f32_layout, kernel, op)?;
+        return out_f32.to_dtype(layout, DType::F16);
+    }
+
+    require_f32(dtype, op)?;
+    let entry = unary_entry_point(kernel).ok_or_else(|| {
+        WgpuError::Message(format!("wgpu unary kernel not available for op {op}"))
+    })?;
+    let out_shape = layout.shape();
+    let out = WgpuStorage::alloc(&device, out_shape, DType::F32)?;
+    let out_layout = Layout::contiguous(out_shape);
+    dispatch_elemwise(ElemwiseDispatch {
+        device: &device,
+        source: UNARY,
+        entry_point: entry,
+        out: &out,
+        out_layout: &out_layout,
+        in0: storage,
+        in0_layout: layout,
+        in1: None,
+        backing: storage.backing(),
+    })
+    .map_err(Error::from)?;
+    Ok(out)
+}
+
 /// NeoX-style rotary positional embedding with dtype-native kernels.
 pub fn dispatch_rope(
     src: &WgpuStorage,
@@ -1707,6 +1899,120 @@ pub fn dispatch_rope_f32(
     sin_layout: &Layout,
 ) -> CandleResult<WgpuStorage> {
     dispatch_rope(src, cos, sin, src_layout, cos_layout, sin_layout)
+}
+
+/// Interleaved rotary positional embedding (pairs adjacent elements in head dim).
+pub fn dispatch_rope_i(
+    src: &WgpuStorage,
+    cos: &WgpuStorage,
+    sin: &WgpuStorage,
+    src_layout: &Layout,
+    cos_layout: &Layout,
+    sin_layout: &Layout,
+) -> CandleResult<WgpuStorage> {
+    let dtype = src.dtype();
+    require_float(dtype, "rope_i")?;
+    if cos.dtype() != dtype || sin.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "rope_i cos/sin dtype must match src {dtype:?}, got cos={:?} sin={:?}",
+            cos.dtype(),
+            sin.dtype()
+        )));
+    }
+    if !(src_layout.is_contiguous() && cos_layout.is_contiguous() && sin_layout.is_contiguous()) {
+        return Err(Error::Msg("Non contiguous rope_i is not implemented".into()).bt());
+    }
+    let (b, h, t, d) = src_layout.shape().dims4()?;
+    let out = WgpuStorage::alloc(src.device(), src_layout.shape(), dtype).map_err(Error::from)?;
+    let out_layout = Layout::contiguous(src_layout.shape());
+    let stride_b = if cos_layout.dims().len() == 3 && sin_layout.dims().len() == 3 {
+        (h * t * d) as u32
+    } else {
+        0u32
+    };
+    let uniforms = RopeIUniforms {
+        bh: (b * h) as u32,
+        td: (t * d) as u32,
+        stride_b,
+        _pad: [0; 68],
+    };
+    let device = src.device();
+    let (shader, entry) = rope_i_shader(dtype);
+    let kernel =
+        WgpuKernel::compile_extended(device, shader, entry, 32).map_err(Error::from)?;
+    let bind_group = kernel
+        .create_extended_bind_group(
+            device,
+            buffer_offset(&out, &out_layout),
+            buffer_offset(src, src_layout),
+            buffer_offset(cos, cos_layout),
+            buffer_offset(sin, sin_layout),
+            uniforms.as_bytes(),
+        )
+        .map_err(Error::from)?;
+    let grid = ((b * h * t * d / 2) as u32).div_ceil(32);
+    src.backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
+        .map_err(Error::from)?;
+    Ok(out)
+}
+
+/// THD-layout rotary positional embedding: tensor shape `(b, t, h, d)`.
+pub fn dispatch_rope_thd(
+    src: &WgpuStorage,
+    cos: &WgpuStorage,
+    sin: &WgpuStorage,
+    src_layout: &Layout,
+    cos_layout: &Layout,
+    sin_layout: &Layout,
+) -> CandleResult<WgpuStorage> {
+    let dtype = src.dtype();
+    require_float(dtype, "rope_thd")?;
+    if cos.dtype() != dtype || sin.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "rope_thd cos/sin dtype must match src {dtype:?}, got cos={:?} sin={:?}",
+            cos.dtype(),
+            sin.dtype()
+        )));
+    }
+    if !(src_layout.is_contiguous() && cos_layout.is_contiguous() && sin_layout.is_contiguous()) {
+        return Err(Error::Msg("Non contiguous rope_thd is not implemented".into()).bt());
+    }
+    let (b, t, h, d) = src_layout.shape().dims4()?;
+    let out = WgpuStorage::alloc(src.device(), src_layout.shape(), dtype).map_err(Error::from)?;
+    let out_layout = Layout::contiguous(src_layout.shape());
+    let stride_b = if cos_layout.dims().len() == 3 && sin_layout.dims().len() == 3 {
+        (h * t * d) as u32
+    } else {
+        0u32
+    };
+    let uniforms = RopeThdUniforms {
+        b: b as u32,
+        t: t as u32,
+        h: h as u32,
+        d: d as u32,
+        stride_b,
+        _pad: [0; 67],
+    };
+    let device = src.device();
+    let (shader, entry) = rope_thd_shader(dtype);
+    let kernel =
+        WgpuKernel::compile_extended(device, shader, entry, 32).map_err(Error::from)?;
+    let bind_group = kernel
+        .create_extended_bind_group(
+            device,
+            buffer_offset(&out, &out_layout),
+            buffer_offset(src, src_layout),
+            buffer_offset(cos, cos_layout),
+            buffer_offset(sin, sin_layout),
+            uniforms.as_bytes(),
+        )
+        .map_err(Error::from)?;
+    let grid = ((b * t * h * d / 2) as u32).div_ceil(32);
+    src.backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
+        .map_err(Error::from)?;
+    Ok(out)
 }
 
 pub fn dispatch_where_u8_f32(
@@ -2230,7 +2536,25 @@ mod tests {
         WgpuKernel::compile_sdpa(&device, SDPA_FULL_BF16, "sdpa_full_bf16", 1).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, RMS_NORM_BF16, "rms_norm_bf16", 32)
             .unwrap();
+        WgpuKernel::compile_extended(&device, LAYER_NORM, "layer_norm_f32", 32).unwrap();
+        WgpuKernel::compile_extended(&device, LAYER_NORM_BF16, "layer_norm_bf16", 32).unwrap();
         WgpuKernel::compile_extended(&device, ROPE_BF16, "rope_bf16", 32).unwrap();
+        WgpuKernel::compile_extended(&device, ROPE_I, "rope_i_f32", 32).unwrap();
+        WgpuKernel::compile_extended(&device, ROPE_THD, "rope_thd_f32", 32).unwrap();
+        WgpuKernel::compile_with_workgroup_size(
+            &device,
+            crate::wgsl::ARGSORT,
+            "asort_asc_f32",
+            256,
+        )
+        .unwrap();
+        WgpuKernel::compile_with_workgroup_size(
+            &device,
+            crate::wgsl::ARGSORT_BF16,
+            "asort_asc_bf16",
+            256,
+        )
+        .unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, QMATMUL_Q5_0, "qmatmul_q5_0_f32", 8)
             .unwrap();
         compile_matmul_kernel(&device, MatMulKernel::TiledBf16).unwrap();

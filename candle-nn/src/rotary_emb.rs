@@ -166,6 +166,23 @@ impl candle::CustomOp3 for RotaryEmbI {
         Ok((dst, l1.shape().clone()))
     }
 
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        s1: &candle::WgpuStorage,
+        l1: &Layout,
+        s2: &candle::WgpuStorage,
+        l2: &Layout,
+        s3: &candle::WgpuStorage,
+        l3: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        if !(l1.is_contiguous() && l2.is_contiguous() && l3.is_contiguous()) {
+            candle::bail!("Non contiguous rope_i is not implemented");
+        }
+        let out = candle::wgpu_device::dispatch_rope_i(s1, s2, s3, l1, l2, l3)?;
+        Ok((out, l1.shape().clone()))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
@@ -748,6 +765,23 @@ impl candle::CustomOp3 for RotaryEmbThd {
             device: dev.clone(),
         };
         Ok((dst, l1.shape().clone()))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        s1: &candle::WgpuStorage,
+        l1: &Layout,
+        s2: &candle::WgpuStorage,
+        l2: &Layout,
+        s3: &candle::WgpuStorage,
+        l3: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        if !(l1.is_contiguous() && l2.is_contiguous() && l3.is_contiguous()) {
+            candle::bail!("Non contiguous rope_thd is not implemented");
+        }
+        let out = candle::wgpu_device::dispatch_rope_thd(s1, s2, s3, l1, l2, l3)?;
+        Ok((out, l1.shape().clone()))
     }
 
     #[cfg(feature = "metal")]

@@ -165,6 +165,21 @@ impl crate::CustomOp1 for ArgSort {
         Ok((dst, layout.shape().clone()))
     }
 
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        storage: &crate::WgpuStorage,
+        layout: &crate::Layout,
+    ) -> Result<(crate::WgpuStorage, crate::Shape)> {
+        use crate::wgpu_device::{cpu_fallback_op1, dispatch_arg_sort_last_dim, gpu_argsort_supported};
+        if gpu_argsort_supported(storage.dtype(), self.last_dim) {
+            let out = dispatch_arg_sort_last_dim(storage, layout, self.asc)?;
+            Ok((out, layout.shape().clone()))
+        } else {
+            cpu_fallback_op1(self, storage, layout).map_err(crate::Error::from)
+        }
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,

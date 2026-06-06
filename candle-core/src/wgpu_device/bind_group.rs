@@ -950,6 +950,26 @@ fixed_uniform!(SoftmaxUniforms {
     last_dim: u32,
 } pad 70);
 
+fixed_uniform!(ArgSortUniforms {
+    ncols: u32,
+    ncols_pad: u32,
+    asc: u32,
+} pad 69);
+
+fixed_uniform!(RopeIUniforms {
+    bh: u32,
+    td: u32,
+    stride_b: u32,
+} pad 68);
+
+fixed_uniform!(RopeThdUniforms {
+    b: u32,
+    t: u32,
+    h: u32,
+    d: u32,
+    stride_b: u32,
+} pad 67);
+
 fixed_uniform!(DequantUniforms {
     elem_count: u32,
 } pad 71);

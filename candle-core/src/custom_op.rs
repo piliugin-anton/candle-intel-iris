@@ -35,11 +35,8 @@ pub trait CustomOp1 {
     }
 
     #[cfg(feature = "wgpu")]
-    fn wgpu_fwd(&self, _storage: &WgpuStorage, _layout: &Layout) -> Result<(WgpuStorage, Shape)> {
-        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
-            "no wgpu implementation for {}",
-            self.name()
-        ))))
+    fn wgpu_fwd(&self, storage: &WgpuStorage, layout: &Layout) -> Result<(WgpuStorage, Shape)> {
+        crate::wgpu_device::cpu_fallback_op1(self, storage, layout).map_err(crate::Error::from)
     }
 
     /// This function takes as argument the argument `arg` used in the forward pass, the result
@@ -94,15 +91,12 @@ pub trait CustomOp2 {
     #[cfg(feature = "wgpu")]
     fn wgpu_fwd(
         &self,
-        _: &WgpuStorage,
-        _: &Layout,
-        _: &WgpuStorage,
-        _: &Layout,
+        s1: &WgpuStorage,
+        l1: &Layout,
+        s2: &WgpuStorage,
+        l2: &Layout,
     ) -> Result<(WgpuStorage, Shape)> {
-        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
-            "no wgpu implementation for {}",
-            self.name()
-        ))))
+        crate::wgpu_device::cpu_fallback_op2(self, s1, l1, s2, l2).map_err(crate::Error::from)
     }
 
     fn bwd(
@@ -166,17 +160,14 @@ pub trait CustomOp3 {
     #[cfg(feature = "wgpu")]
     fn wgpu_fwd(
         &self,
-        _: &WgpuStorage,
-        _: &Layout,
-        _: &WgpuStorage,
-        _: &Layout,
-        _: &WgpuStorage,
-        _: &Layout,
+        s1: &WgpuStorage,
+        l1: &Layout,
+        s2: &WgpuStorage,
+        l2: &Layout,
+        s3: &WgpuStorage,
+        l3: &Layout,
     ) -> Result<(WgpuStorage, Shape)> {
-        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
-            "no wgpu implementation for {}",
-            self.name()
-        ))))
+        crate::wgpu_device::cpu_fallback_op3(self, s1, l1, s2, l2, s3, l3).map_err(crate::Error::from)
     }
 
     fn bwd(
@@ -312,11 +303,9 @@ pub trait InplaceOp1 {
     }
 
     #[cfg(feature = "wgpu")]
-    fn wgpu_fwd(&self, _storage: &mut WgpuStorage, _layout: &Layout) -> Result<()> {
-        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
-            "no wgpu implementation for {}",
-            self.name()
-        ))))
+    fn wgpu_fwd(&self, storage: &mut WgpuStorage, layout: &Layout) -> Result<()> {
+        crate::wgpu_device::cpu_fallback_inplace_op1(self, storage, layout)
+            .map_err(crate::Error::from)
     }
 }
 
@@ -351,11 +340,14 @@ pub trait InplaceOp2 {
     }
 
     #[cfg(feature = "wgpu")]
-    fn wgpu_fwd(&self, _: &mut WgpuStorage, _: &Layout, _: &WgpuStorage, _: &Layout) -> Result<()> {
-        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
-            "no wgpu implementation for {}",
-            self.name()
-        ))))
+    fn wgpu_fwd(
+        &self,
+        s1: &mut WgpuStorage,
+        l1: &Layout,
+        s2: &WgpuStorage,
+        l2: &Layout,
+    ) -> Result<()> {
+        crate::wgpu_device::cpu_fallback_inplace_op2(self, s1, l1, s2, l2).map_err(crate::Error::from)
     }
 }
 
@@ -409,17 +401,15 @@ pub trait InplaceOp3 {
     #[cfg(feature = "wgpu")]
     fn wgpu_fwd(
         &self,
-        _: &mut WgpuStorage,
-        _: &Layout,
-        _: &WgpuStorage,
-        _: &Layout,
-        _: &WgpuStorage,
-        _: &Layout,
+        s1: &mut WgpuStorage,
+        l1: &Layout,
+        s2: &WgpuStorage,
+        l2: &Layout,
+        s3: &WgpuStorage,
+        l3: &Layout,
     ) -> Result<()> {
-        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
-            "no wgpu implementation for {}",
-            self.name()
-        ))))
+        crate::wgpu_device::cpu_fallback_inplace_op3(self, s1, l1, s2, l2, s3, l3)
+            .map_err(crate::Error::from)
     }
 }
 
