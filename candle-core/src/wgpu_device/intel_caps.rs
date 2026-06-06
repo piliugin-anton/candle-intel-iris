@@ -163,6 +163,16 @@ pub fn tune_shader_source(source: &str, caps: &IntelCaps) -> String {
     out
 }
 
+/// Inject matrix-multiply tile size from device caps.
+pub fn tune_matmul_shader_source(source: &str, caps: &IntelCaps) -> String {
+    inject_workgroup_size(
+        source,
+        "MATMUL_WG_SIZE",
+        crate::wgsl::MATMUL_WORKGROUP_SIZE,
+        caps.matmul_tile_size,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +231,17 @@ mod tests {
         };
         assert_eq!(caps.effective_compute_dtype(DType::F16), DType::F16);
         assert_eq!(caps.effective_compute_dtype(DType::BF16), DType::BF16);
+    }
+
+    #[test]
+    fn tune_matmul_injects_tile_size() {
+        let caps = IntelCaps {
+            matmul_tile_size: 8,
+            ..IntelCaps::default_fallback()
+        };
+        let src = "const MATMUL_WG_SIZE: u32 = 16u;";
+        let out = tune_matmul_shader_source(src, &caps);
+        assert!(out.contains("const MATMUL_WG_SIZE: u32 = 8u"));
     }
 
     #[test]

@@ -290,6 +290,24 @@ pub fn rope_i_slow(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
 #[derive(Debug, Clone)]
 struct RotaryEmb;
 
+impl RotaryEmb {
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd_storage(
+        s1: &candle::WgpuStorage,
+        l1: &Layout,
+        s2: &candle::WgpuStorage,
+        l2: &Layout,
+        s3: &candle::WgpuStorage,
+        l3: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        if !(l1.is_contiguous() && l2.is_contiguous() && l3.is_contiguous()) {
+            candle::bail!("Non contiguous rope is not implemented");
+        }
+        let out = candle::wgpu_device::dispatch_rope_f32(s1, s2, s3, l1, l2, l3)?;
+        Ok((out, l1.shape().clone()))
+    }
+}
+
 impl candle::CustomOp3 for RotaryEmb {
     fn name(&self) -> &'static str {
         "rotary-emb"
@@ -447,6 +465,19 @@ impl candle::CustomOp3 for RotaryEmb {
             device: dev.clone(),
         };
         Ok((dst, l1.shape().clone()))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        s1: &candle::WgpuStorage,
+        l1: &Layout,
+        s2: &candle::WgpuStorage,
+        l2: &Layout,
+        s3: &candle::WgpuStorage,
+        l3: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        Self::wgpu_fwd_storage(s1, l1, s2, l2, s3, l3)
     }
 
     #[cfg(feature = "metal")]

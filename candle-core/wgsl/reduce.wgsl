@@ -3,7 +3,7 @@
 // One workgroup produces one output element. Dispatch `dst_elem_count` workgroups
 // of size `REDUCE_WG_SIZE` (32, tuned for Intel integrated GPUs).
 //
-// Entry points: reduce_sum_f32, reduce_mean_f32, reduce_max_f32, reduce_argmax_f32
+// Entry points: reduce_sum_f32, reduce_mean_f32, reduce_max_f32, reduce_min_f32, reduce_argmax_f32
 
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_sum_f32(
@@ -87,6 +87,35 @@ fn reduce_max_f32(
     }
     wg_max_val[tid] = best;
     workgroup_reduce_max(tid);
+
+    if (tid == 0u) {
+        reduce_out_f32[dst_id] = wg_max_val[0];
+    }
+}
+
+@compute @workgroup_size(REDUCE_WG_SIZE)
+fn reduce_min_f32(
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+) {
+    let dst_id = wg_id.x;
+    if (dst_id >= reduce_params.dst_elem_count) {
+        return;
+    }
+
+    let chunk = reduce_params.reduce_chunk_size;
+    let start = dst_id * chunk;
+    let stop = min(start + chunk, reduce_params.src_elem_count);
+    let tid = local_id.x;
+
+    var best = 3.402823e+38;
+    var idx = start + tid;
+    while (idx < stop) {
+        best = min(best, reduce_load_src(idx));
+        idx += REDUCE_WG_SIZE;
+    }
+    wg_max_val[tid] = best;
+    workgroup_reduce_min(tid);
 
     if (tid == 0u) {
         reduce_out_f32[dst_id] = wg_max_val[0];

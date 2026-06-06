@@ -11,23 +11,29 @@ mod shader_cache;
 mod storage;
 
 pub use crate::wgsl::{
-    BINARY, CAST, COMMON, COPY, ELEM_WORKGROUP_SIZE, MATMUL_NAIVE, MATMUL_TILED,
-    MATMUL_WORKGROUP_SIZE, REDUCE, REDUCE_WORKGROUP_SIZE, UNARY,
+    BINARY, CAST, COMMON, COPY, COPY2D, ELEM_WORKGROUP_SIZE, MATMUL_NAIVE, MATMUL_TILED,
+    MATMUL_TILED_F16, MATMUL_TILED_VEC, MATMUL_VEC_WIDTH, MATMUL_WORKGROUP_SIZE, QMATMUL_Q4_0,
+    REDUCE, REDUCE_WORKGROUP_SIZE, RMS_NORM, ROPE, UNARY, WHERE_COND,
 };
 pub use adapter::{is_intel_adapter, WgpuDeviceConfig, INTEL_VENDOR_ID};
 pub use allocator::Allocator;
 pub use bind_group::{
-    BindGroupBuilder, KernelUniforms, StandardBindGroupArgs, StandardBindGroupLayout,
-    TensorLayoutUniform, MAX_TENSOR_DIMS,
+    BindGroupBuilder, ExtendedBindGroupBuilder, ExtendedBindGroupLayout, KernelUniforms,
+    StandardBindGroupArgs, StandardBindGroupLayout, TensorLayoutUniform, MAX_TENSOR_DIMS,
 };
 pub use error::{Result, WgpuError};
 pub use intel_caps::{
-    detect_generation, inject_workgroup_size, tune_shader_source, IntelCaps, IntelGeneration,
-    DEFAULT_UMA_AUTO_MAP_THRESHOLD,
+    detect_generation, inject_workgroup_size, tune_matmul_shader_source, tune_shader_source,
+    IntelCaps, IntelGeneration, DEFAULT_UMA_AUTO_MAP_THRESHOLD,
 };
 pub use kernel::{KernelDispatchArgs, WgpuKernel};
 pub use mapped_buffer::{MappedBacking, MAPPED_READ_USAGE};
 pub use shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
+pub use async_io::wait_for_buffer_map;
+pub use ops::{
+    dispatch_copy2d, dispatch_copy_strided_src, dispatch_qmatmul_q4_0, dispatch_rms_norm_f32,
+    dispatch_rope_f32, dispatch_where_u8_f32, upload_q4_0_weights,
+};
 pub use storage::{buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
 
 use crate::backend::BackendDevice;

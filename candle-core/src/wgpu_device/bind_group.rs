@@ -106,6 +106,20 @@ impl KernelUniforms {
         }
     }
 
+    /// Uniform block for `affine_f32`: `_pad0[0]` / `_pad0[1]` are f32 `mul` / `add` bit patterns.
+    pub fn new_affine(
+        elem_count: usize,
+        out_layout: &Layout,
+        in0_layout: &Layout,
+        mul: f64,
+        add: f64,
+    ) -> Self {
+        let mut uniforms = Self::new(elem_count, out_layout, in0_layout, None);
+        uniforms._pad0[0] = (mul as f32).to_bits();
+        uniforms._pad0[1] = (add as f32).to_bits();
+        uniforms
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         debug_assert_eq!(std::mem::size_of::<Self>(), STANDARD_UNIFORM_SIZE);
         debug_assert_eq!(
@@ -133,6 +147,38 @@ pub struct MatMulUniforms {
     pub a_layout: TensorLayoutUniform,
     pub b_layout: TensorLayoutUniform,
     pub _tail_pad: [u32; 8],
+}
+
+/// Uniform block for quantized matmul kernels (`QMatMulParams` in WGSL).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QMatMulUniforms {
+    pub batch: u32,
+    pub m: u32,
+    pub n: u32,
+    pub k: u32,
+    pub _tail_pad: [u32; 68],
+}
+
+impl QMatMulUniforms {
+    pub fn new(batch: usize, m: usize, n: usize, k: usize) -> Self {
+        Self {
+            batch: batch as u32,
+            m: m as u32,
+            n: n as u32,
+            k: k as u32,
+            _tail_pad: [0; 68],
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        debug_assert_eq!(std::mem::size_of::<Self>(), STANDARD_UNIFORM_SIZE);
+        // SAFETY: `Self` is `#[repr(C)]` with no padding beyond documented fields; size is
+        // checked above. Reading `size_of::<Self>()` bytes as a byte slice is valid.
+        unsafe {
+            std::slice::from_raw_parts((self as *const Self).cast(), std::mem::size_of::<Self>())
+        }
+    }
 }
 
 impl MatMulUniforms {
@@ -467,9 +513,225 @@ impl BindGroupBuilder {
     }
 }
 
+/// Bind group layout for kernels with three read-only inputs (e.g. rope, where_cond).
+#[derive(Clone)]
+pub struct ExtendedBindGroupLayout {
+    inner: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
+}
+
+impl std::fmt::Debug for ExtendedBindGroupLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtendedBindGroupLayout")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for ExtendedBindGroupLayout {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExtendedBindGroupLayout {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn get_or_create(&self, device: &wgpu::Device) -> Result<wgpu::BindGroupLayout> {
+        {
+            let guard = self.inner.read()?;
+            if let Some(layout) = guard.as_ref() {
+                return Ok(layout.clone());
+            }
+        }
+
+        let storage_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: if read_only {
+                    wgpu::BufferBindingType::Storage { read_only: true }
+                } else {
+                    wgpu::BufferBindingType::Storage { read_only: false }
+                },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("candle extended kernel bind group layout"),
+            entries: &[
+                storage_entry(0, false),
+                storage_entry(1, true),
+                storage_entry(2, true),
+                storage_entry(3, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(STANDARD_UNIFORM_MIN_BINDING),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let mut guard = self.inner.write()?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        guard.replace(layout.clone());
+        Ok(layout)
+    }
+}
+
+/// Builds bind groups for extended (3-input) Candle wgpu kernels.
+#[derive(Clone, Debug)]
+pub struct ExtendedBindGroupBuilder {
+    layout: ExtendedBindGroupLayout,
+}
+
+impl Default for ExtendedBindGroupBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExtendedBindGroupBuilder {
+    pub fn new() -> Self {
+        Self {
+            layout: ExtendedBindGroupLayout::new(),
+        }
+    }
+
+    pub fn bind_group_layout(&self) -> &ExtendedBindGroupLayout {
+        &self.layout
+    }
+
+    pub fn create_bind_group(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        output: BufferOffset<'_>,
+        input0: BufferOffset<'_>,
+        input1: BufferOffset<'_>,
+        input2: BufferOffset<'_>,
+        uniform_bytes: &[u8],
+    ) -> Result<wgpu::BindGroup> {
+        let layout = self.layout.get_or_create(device)?;
+        let uniform_buffer = BindGroupBuilder::create_uniform_buffer_bytes(device, queue, uniform_bytes);
+
+        Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("candle extended kernel bind group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: output.buffer,
+                        offset: output.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: input0.buffer,
+                        offset: input0.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: input1.buffer,
+                        offset: input1.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: input2.buffer,
+                        offset: input2.offset_in_bytes,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        }))
+    }
+}
+
+macro_rules! fixed_uniform {
+    ($name:ident { $($field:ident : $ty:ty),* $(,)? } pad $pad:expr) => {
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub struct $name {
+            $(pub $field: $ty,)*
+            pub _pad: [u32; $pad],
+        }
+
+        impl $name {
+            pub fn as_bytes(&self) -> &[u8] {
+                debug_assert_eq!(std::mem::size_of::<Self>(), STANDARD_UNIFORM_SIZE);
+                // SAFETY: `Self` is `#[repr(C)]` with fixed size `STANDARD_UNIFORM_SIZE`.
+                unsafe {
+                    std::slice::from_raw_parts(
+                        (self as *const Self).cast(),
+                        std::mem::size_of::<Self>(),
+                    )
+                }
+            }
+        }
+    };
+}
+
+fixed_uniform!(Copy2dUniforms {
+    d1: u32,
+    d2: u32,
+    src_stride: u32,
+    dst_stride: u32,
+    src_offset: u32,
+    dst_offset: u32,
+} pad 66);
+
+fixed_uniform!(RmsNormUniforms {
+    n_rows: u32,
+    n_cols: u32,
+    eps_bits: u32,
+} pad 69);
+
+fixed_uniform!(RopeUniforms {
+    b: u32,
+    h: u32,
+    t: u32,
+    d: u32,
+    unbatched_cs: u32,
+} pad 67);
+
+fixed_uniform!(WhereUniforms { elem_count: u32 } pad 71);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn affine_uniforms_pack_mul_add_into_pad0() {
+        let layout = Layout::contiguous((2, 3));
+        let u = KernelUniforms::new_affine(6, &layout, &layout, 2.0, 0.5);
+        assert_eq!(u._pad0[0], 2.0f32.to_bits());
+        assert_eq!(u._pad0[1], 0.5f32.to_bits());
+    }
 
     #[test]
     fn kernel_uniforms_size_is_copy_aligned() {
@@ -477,6 +739,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<KernelUniforms>() % 16, 0);
         assert_eq!(std::mem::size_of::<KernelUniforms>(), STANDARD_UNIFORM_SIZE);
         assert_eq!(std::mem::size_of::<MatMulUniforms>(), STANDARD_UNIFORM_SIZE);
+        assert_eq!(std::mem::size_of::<QMatMulUniforms>(), STANDARD_UNIFORM_SIZE);
         assert_eq!(std::mem::size_of::<ReduceUniforms>(), STANDARD_UNIFORM_SIZE);
     }
 

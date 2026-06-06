@@ -14,6 +14,9 @@ struct PipelineKey {
 /// Cache key for pipelines using [`super::bind_group::StandardBindGroupLayout`].
 pub const STANDARD_KERNEL_LAYOUT_KEY: u64 = 1;
 
+/// Cache key for pipelines using [`super::bind_group::ExtendedBindGroupLayout`] (3 inputs).
+pub const EXTENDED_KERNEL_LAYOUT_KEY: u64 = 2;
+
 /// Cache for compiled WGSL compute pipelines.
 ///
 /// Shader modules are kept alive alongside their pipelines so that pipeline

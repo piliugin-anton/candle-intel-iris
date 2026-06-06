@@ -131,7 +131,7 @@ fn from_raw_data<T: super::GgmlType + Send + Sync + 'static>(
         Device::Metal(metal) => super::metal::load_quantized(metal, data)?,
         Device::Cuda(cuda) => super::cuda::load_quantized(cuda, data)?,
         #[cfg(feature = "wgpu")]
-        Device::Wgpu(_) => crate::bail!("wgpu quantized tensors not yet implemented"),
+        Device::Wgpu(d) => super::wgpu::load_quantized(d, data)?,
     };
     super::QTensor::new(data, dims)
 }

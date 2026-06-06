@@ -421,8 +421,8 @@ impl BackendStorage for WgpuStorage {
         self.cast_via_cpu(layout, dtype).map_err(Error::from)
     }
 
-    fn affine(&self, _: &Layout, _: f64, _: f64) -> CandleResult<Self> {
-        wgpu_not_impl!("affine")
+    fn affine(&self, layout: &Layout, mul: f64, add: f64) -> CandleResult<Self> {
+        ops::dispatch_affine(self, layout, mul, add)
     }
 
     fn powf(&self, _: &Layout, _: f64) -> CandleResult<Self> {
@@ -461,13 +461,21 @@ impl BackendStorage for WgpuStorage {
 
     fn where_cond(
         &self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
-        _: &Self,
-        _: &Layout,
+        layout: &Layout,
+        on_true: &Self,
+        on_true_layout: &Layout,
+        on_false: &Self,
+        on_false_layout: &Layout,
     ) -> CandleResult<Self> {
-        wgpu_not_impl!("where_cond")
+        ops::dispatch_where_u8_f32(
+            self,
+            on_true,
+            on_false,
+            layout,
+            on_true_layout,
+            on_false_layout,
+        )
+        .map_err(Error::from)
     }
 
     fn conv1d(
@@ -592,21 +600,31 @@ impl BackendStorage for WgpuStorage {
         ops::dispatch_matmul(self, rhs, bmnk, lhs_layout, rhs_layout)
     }
 
-    fn copy_strided_src(&self, _: &mut Self, _: usize, _: &Layout) -> CandleResult<()> {
-        wgpu_not_impl!("copy_strided_src")
+    fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> CandleResult<()> {
+        ops::dispatch_copy_strided_src(self, dst, dst_offset, src_l).map_err(Error::from)
     }
 
     fn copy2d(
         &self,
-        _: &mut Self,
-        _: usize,
-        _: usize,
-        _: usize,
-        _: usize,
-        _: usize,
-        _: usize,
+        dst: &mut Self,
+        d1: usize,
+        d2: usize,
+        src_stride1: usize,
+        dst_stride1: usize,
+        src_offset: usize,
+        dst_offset: usize,
     ) -> CandleResult<()> {
-        wgpu_not_impl!("copy2d")
+        ops::dispatch_copy2d(
+            self,
+            dst,
+            d1,
+            d2,
+            src_stride1,
+            dst_stride1,
+            src_offset,
+            dst_offset,
+        )
+        .map_err(Error::from)
     }
 
     fn const_set(&mut self, _: crate::scalar::Scalar, _: &Layout) -> CandleResult<()> {

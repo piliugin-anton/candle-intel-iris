@@ -572,6 +572,21 @@ impl candle::CustomOp2 for RmsNorm {
         Ok((dst, l1.shape().clone()))
     }
 
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        s1: &candle::WgpuStorage,
+        l1: &Layout,
+        s2: &candle::WgpuStorage,
+        l2: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        if !(l1.is_contiguous() && l2.is_contiguous()) {
+            candle::bail!("Non contiguous rmsnorm is not implemented");
+        }
+        let out = candle::wgpu_device::dispatch_rms_norm_f32(s1, s2, l1, l2, self.eps)?;
+        Ok((out, l1.shape().clone()))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,

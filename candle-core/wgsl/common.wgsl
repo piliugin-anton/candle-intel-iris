@@ -18,7 +18,9 @@ struct TensorLayout {
 
 struct KernelParams {
     elem_count: u32,
-    _pad: vec3<u32>,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
     out_layout: TensorLayout,
     in0_layout: TensorLayout,
     in1_layout: TensorLayout,

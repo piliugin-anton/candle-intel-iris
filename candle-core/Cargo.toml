@@ -43,6 +43,7 @@ candle-ug = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+candle-nn = { workspace = true, features = ["wgpu"] }
 clap = { workspace = true }
 criterion = { workspace = true }
 

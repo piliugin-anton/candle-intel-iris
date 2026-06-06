@@ -1,7 +1,9 @@
 use super::async_io::poll_device;
 use super::bind_group::{
-    BindGroupBuilder, KernelUniforms, StandardBindGroupArgs, StandardBindGroupLayout,
+    BindGroupBuilder, ExtendedBindGroupBuilder, KernelUniforms, StandardBindGroupArgs,
+    StandardBindGroupLayout,
 };
+use super::shader_cache::EXTENDED_KERNEL_LAYOUT_KEY;
 use super::error::Result;
 use super::intel_caps::tune_shader_source;
 use super::shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
@@ -14,6 +16,7 @@ use crate::Layout;
 pub struct WgpuKernel {
     pipeline: wgpu::ComputePipeline,
     bind_group_builder: BindGroupBuilder,
+    extended_bind_group_builder: Option<ExtendedBindGroupBuilder>,
     workgroup_size: u32,
 }
 
@@ -107,6 +110,33 @@ impl WgpuKernel {
         Ok(Self {
             pipeline,
             bind_group_builder,
+            extended_bind_group_builder: None,
+            workgroup_size,
+        })
+    }
+
+    pub fn compile_extended(
+        device: &WgpuDevice,
+        source: &str,
+        entry_point: &str,
+        workgroup_size: u32,
+    ) -> Result<Self> {
+        let extended_bind_group_builder = ExtendedBindGroupBuilder::new();
+        let layout = extended_bind_group_builder
+            .bind_group_layout()
+            .get_or_create(device.device())?;
+        let pipeline = device.shader_cache().get_or_create_pipeline_with_layout(
+            device.device(),
+            Some(&layout),
+            EXTENDED_KERNEL_LAYOUT_KEY,
+            source,
+            entry_point,
+        )?;
+
+        Ok(Self {
+            pipeline,
+            bind_group_builder: BindGroupBuilder::new(),
+            extended_bind_group_builder: Some(extended_bind_group_builder),
             workgroup_size,
         })
     }
@@ -130,6 +160,7 @@ impl WgpuKernel {
         Ok(Self {
             pipeline,
             bind_group_builder: BindGroupBuilder::new(),
+            extended_bind_group_builder: None,
             workgroup_size,
         })
     }
@@ -205,6 +236,30 @@ impl WgpuKernel {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
+    }
+
+    pub fn create_extended_bind_group(
+        &self,
+        device: &WgpuDevice,
+        output: BufferOffset<'_>,
+        input0: BufferOffset<'_>,
+        input1: BufferOffset<'_>,
+        input2: BufferOffset<'_>,
+        uniform_bytes: &[u8],
+    ) -> Result<wgpu::BindGroup> {
+        let builder = self
+            .extended_bind_group_builder
+            .as_ref()
+            .ok_or_else(|| super::error::WgpuError::Message("kernel is not extended".into()))?;
+        builder.create_bind_group(
+            device.device(),
+            device.queue(),
+            output,
+            input0,
+            input1,
+            input2,
+            uniform_bytes,
+        )
     }
 
     pub fn dispatch_bind_group(

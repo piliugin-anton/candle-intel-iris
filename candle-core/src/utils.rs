@@ -28,6 +28,14 @@ pub fn metal_is_available() -> bool {
     cfg!(feature = "metal")
 }
 
+/// Returns true when the crate was built with `wgpu` and a usable adapter is present.
+pub fn wgpu_is_available() -> bool {
+    if !cfg!(feature = "wgpu") {
+        return false;
+    }
+    crate::Device::new_wgpu().is_ok()
+}
+
 pub fn with_avx() -> bool {
     cfg!(target_feature = "avx2")
 }

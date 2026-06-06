@@ -86,3 +86,14 @@ fn workgroup_reduce_max(local_id: u32) {
         stride /= 2u;
     }
 }
+
+fn workgroup_reduce_min(local_id: u32) {
+    var stride = REDUCE_WG_SIZE / 2u;
+    while (stride > 0u) {
+        workgroupBarrier();
+        if (local_id < stride) {
+            wg_max_val[local_id] = min(wg_max_val[local_id], wg_max_val[local_id + stride]);
+        }
+        stride /= 2u;
+    }
+}

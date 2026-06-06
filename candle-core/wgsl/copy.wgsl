@@ -12,9 +12,9 @@ fn copy_strided_f32(
     @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
     let stride = grid_stride_x(num_wg);
-    let count = params.elem_count;
-    let src_layout = params.in0_layout;
-    let dst_layout = params.out_layout;
+    let count = kernel_params.elem_count;
+    let src_layout = kernel_params.in0_layout;
+    let dst_layout = kernel_params.out_layout;
 
     for (var i = gid.x; i < count; i = i + stride) {
         let src_idx = if (is_contiguous(src_layout)) {
