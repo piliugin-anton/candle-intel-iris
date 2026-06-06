@@ -147,22 +147,34 @@ impl WgpuStorage {
         Ok(Self::new(backing, device.clone(), elem_count, dtype))
     }
 
+    /// Uploads a raw byte slice into a freshly allocated GPU buffer (single host→GPU copy).
+    pub fn from_bytes(device: &WgpuDevice, data: &[u8], elem_count: usize, dtype: DType) -> Result<Self> {
+        let expected = elem_count * dtype.size_in_bytes();
+        if data.len() != expected {
+            return Err(WgpuError::Message(format!(
+                "wgpu from_bytes: expected {expected} bytes, got {}",
+                data.len()
+            )));
+        }
+        let byte_len = data.len();
+        let use_mapped = Self::should_use_mapped(device, byte_len, false);
+        let backing = if use_mapped {
+            let mapped = MappedBacking::new(device, byte_len)?;
+            device.queue().write_buffer(mapped.storage(), 0, data);
+            BufferBacking::Mapped(mapped)
+        } else {
+            let buffer = device.allocate_buffer(byte_len, STORAGE_BUFFER_USAGE)?;
+            device.queue().write_buffer(&buffer, 0, data);
+            BufferBacking::DeviceLocal(buffer)
+        };
+        Ok(Self::new(backing, device.clone(), elem_count, dtype))
+    }
+
     /// Uploads CPU storage into a freshly allocated GPU buffer.
     pub fn from_cpu(device: &WgpuDevice, storage: &CpuStorage) -> Result<Self> {
         let dtype = storage.dtype();
         let (bytes, elem_count) = cpu_storage_as_bytes(storage)?;
-        let byte_len = bytes.len();
-        let use_mapped = Self::should_use_mapped(device, byte_len, false);
-        let backing = if use_mapped {
-            let mapped = MappedBacking::new(device, byte_len)?;
-            device.queue().write_buffer(mapped.storage(), 0, bytes);
-            BufferBacking::Mapped(mapped)
-        } else {
-            let buffer = device.allocate_buffer(byte_len, STORAGE_BUFFER_USAGE)?;
-            device.queue().write_buffer(&buffer, 0, bytes);
-            BufferBacking::DeviceLocal(buffer)
-        };
-        Ok(Self::new(backing, device.clone(), elem_count, dtype))
+        Self::from_bytes(device, bytes, elem_count, dtype)
     }
 
     pub(crate) fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
@@ -353,6 +365,10 @@ pub(crate) fn cpu_storage_as_bytes(storage: &CpuStorage) -> Result<(&[u8], usize
             storage.dtype()
         ))),
     }
+}
+
+pub(crate) fn typed_slice_as_bytes<T>(data: &[T]) -> &[u8] {
+    bytemuck_slice(data)
 }
 
 fn bytemuck_slice<T>(data: &[T]) -> &[u8] {
@@ -659,5 +675,15 @@ mod tests {
         let shape = Shape::from((1024,));
         let storage = device.alloc_pinned_mapped(&shape, DType::F32).unwrap();
         assert!(storage.is_mapped());
+    }
+
+    #[test]
+    fn from_bytes_round_trip() {
+        let device = WgpuDevice::new_test(true, 1024);
+        let data = [1.0f32, 2.0, 3.0];
+        let bytes = typed_slice_as_bytes(&data);
+        let storage = WgpuStorage::from_bytes(&device, bytes, 3, DType::F32).unwrap();
+        assert_eq!(storage.dtype(), DType::F32);
+        assert_eq!(storage.elem_count(), 3);
     }
 }

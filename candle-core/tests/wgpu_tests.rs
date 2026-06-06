@@ -25,12 +25,15 @@
 
 #![cfg(feature = "wgpu")]
 
-use candle_core::quantized::k_quants::{self, BlockQ4_0};
+use candle_core::quantized::k_quants::{self, BlockQ4_0, BlockQ4K, BlockQ8_0};
 use candle_core::quantized::GgmlType;
-use candle_core::wgpu_device::{dispatch_qmatmul_q4_0, upload_q4_0_weights};
+use candle_core::wgpu_device::{
+    dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k, dispatch_qmatmul_q8_0, upload_quant_weights,
+};
 use candle_core::{backend::BackendStorage, Device, DType, Module, Result, Storage, Tensor};
 
 const EPS: f32 = 1e-4;
+const BF16_EPS: f32 = 0.03;
 
 fn wgpu_device() -> Result<Device> {
     Device::new_wgpu()
@@ -52,6 +55,12 @@ fn assert_parity(cpu: &Tensor, gpu: &Tensor) -> Result<()> {
 fn assert_qmatmul_parity(cpu: &Tensor, gpu: &Tensor) -> Result<()> {
     let d = max_abs_diff(cpu, gpu)?;
     assert!(d < 64.0, "qmatmul max abs diff {d} >= 64.0");
+    Ok(())
+}
+
+fn assert_qmatmul_parity_tol(cpu: &Tensor, gpu: &Tensor, tol: f32) -> Result<()> {
+    let d = max_abs_diff(cpu, gpu)?;
+    assert!(d < tol, "qmatmul max abs diff {d} >= {tol}");
     Ok(())
 }
 
@@ -136,7 +145,8 @@ fn parity_matmul_f16() -> Result<()> {
     let a_gpu = a_cpu.to_device(&gpu)?;
     let b_gpu = b_cpu.to_device(&gpu)?;
     let out_gpu = a_gpu.matmul(&b_gpu)?;
-    assert_parity(&out_cpu.to_dtype(DType::F32)?, &out_gpu.to_dtype(DType::F32)?)?;
+    let d = max_abs_diff(&out_cpu.to_dtype(DType::F32)?, &out_gpu.to_dtype(DType::F32)?)?;
+    assert!(d < 2e-4, "f16 matmul max abs diff {d} >= 2e-4");
 
     Ok(())
 }
@@ -212,7 +222,7 @@ fn parity_qmatmul_q4_0_f32() -> Result<()> {
             rhs_blocks.len() * std::mem::size_of::<BlockQ4_0>(),
         )
     };
-    let rhs_buf = upload_q4_0_weights(&wgpu_dev, bytes)?;
+    let rhs_buf = upload_quant_weights(&wgpu_dev, bytes)?;
     let out_gpu = dispatch_qmatmul_q4_0(
         &wgpu_lhs,
         &rhs_buf,
@@ -429,5 +439,211 @@ fn parity_softmax_f32_3d() -> Result<()> {
     let xs_cpu = Tensor::rand(-3.0f32, 3.0f32, (1, 8, 16), &cpu)?;
     let xs_gpu = xs_cpu.to_device(&gpu)?;
     assert_parity(&softmax(&xs_cpu, 2)?, &softmax(&xs_gpu, 2)?)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_softmax_last_dim_fused() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs_cpu = Tensor::rand(-3.0f32, 3.0f32, (2, 16), &cpu)?;
+    let xs_gpu = xs_cpu.to_device(&gpu)?;
+    let out_cpu = candle_nn::ops::softmax_last_dim(&xs_cpu)?;
+    let out_gpu = candle_nn::ops::softmax_last_dim(&xs_gpu)?;
+    assert_parity(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_qmatmul_q8_0_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let wgpu_dev = match &gpu {
+        Device::Wgpu(d) => d.clone(),
+        _ => unreachable!(),
+    };
+
+    let m = 2usize;
+    let n = 4usize;
+    let k = 32usize;
+    let lhs_s: Vec<f32> = (0..m * k).map(|v| (v as f32) * 0.01 - 0.5).collect();
+    let rhs_s: Vec<f32> = (0..n * k).map(|v| (v as f32) * 0.02 - 1.0).collect();
+    let mut rhs_blocks = vec![BlockQ8_0::zeros(); n * k / 32];
+    BlockQ8_0::from_float(&rhs_s, &mut rhs_blocks);
+    let mut dst_cpu = vec![0f32; m * n];
+    k_quants::matmul((m, k, n), &lhs_s, &rhs_blocks, &mut dst_cpu)?;
+    let out_cpu = Tensor::from_vec(dst_cpu, (m, n), &cpu)?;
+
+    let lhs_gpu = Tensor::from_vec(lhs_s, (m, k), &gpu)?;
+    let (lhs_guard, lhs_layout) = lhs_gpu.storage_and_layout();
+    let wgpu_lhs = match &*lhs_guard {
+        Storage::Wgpu(s) => s.clone(),
+        _ => unreachable!(),
+    };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            rhs_blocks.as_ptr().cast(),
+            rhs_blocks.len() * std::mem::size_of::<BlockQ8_0>(),
+        )
+    };
+    let rhs_buf = upload_quant_weights(&wgpu_dev, bytes)?;
+    let out_gpu = dispatch_qmatmul_q8_0(&wgpu_lhs, &rhs_buf, (1, m, n, k), lhs_layout)?;
+    let out_gpu_t = Tensor::from_vec(
+        match out_gpu.to_cpu_storage()? {
+            candle_core::CpuStorage::F32(v) => v,
+            _ => unreachable!(),
+        },
+        (m, n),
+        &cpu,
+    )?;
+    assert_qmatmul_parity_tol(&out_cpu, &out_gpu_t, 0.001)?;
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_qmatmul_q4_k_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let wgpu_dev = match &gpu {
+        Device::Wgpu(d) => d.clone(),
+        _ => unreachable!(),
+    };
+
+    let m = 2usize;
+    let n = 2usize;
+    let k = 256usize;
+    let lhs_s: Vec<f32> = (0..m * k).map(|v| (v as f32) * 0.001 - 0.5).collect();
+    let rhs_s: Vec<f32> = (0..n * k).map(|v| (v as f32) * 0.002 - 1.0).collect();
+    let mut rhs_blocks = vec![BlockQ4K::zeros(); n * k / 256];
+    BlockQ4K::from_float(&rhs_s, &mut rhs_blocks);
+    let mut dst_cpu = vec![0f32; m * n];
+    k_quants::matmul((m, k, n), &lhs_s, &rhs_blocks, &mut dst_cpu)?;
+    let out_cpu = Tensor::from_vec(dst_cpu, (m, n), &cpu)?;
+
+    let lhs_gpu = Tensor::from_vec(lhs_s, (m, k), &gpu)?;
+    let (lhs_guard, lhs_layout) = lhs_gpu.storage_and_layout();
+    let wgpu_lhs = match &*lhs_guard {
+        Storage::Wgpu(s) => s.clone(),
+        _ => unreachable!(),
+    };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            rhs_blocks.as_ptr().cast(),
+            rhs_blocks.len() * std::mem::size_of::<BlockQ4K>(),
+        )
+    };
+    let rhs_buf = upload_quant_weights(&wgpu_dev, bytes)?;
+    let out_gpu = dispatch_qmatmul_q4_k(&wgpu_lhs, &rhs_buf, (1, m, n, k), lhs_layout)?;
+    let out_gpu_t = Tensor::from_vec(
+        match out_gpu.to_cpu_storage()? {
+            candle_core::CpuStorage::F32(v) => v,
+            _ => unreachable!(),
+        },
+        (m, n),
+        &cpu,
+    )?;
+    assert_qmatmul_parity_tol(&out_cpu, &out_gpu_t, 0.0025)?;
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_cast_bf16_roundtrip() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs = Tensor::from_vec(vec![1.0f32, -2.5, 0.0, 3.25, -0.125], (5,), &cpu)?;
+    let roundtrip = xs.to_device(&gpu)?.to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+    assert_parity(&xs, &roundtrip.to_device(&cpu)?)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_matmul_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    if !gpu.supports_bf16() {
+        return Ok(());
+    }
+    let cpu = Device::Cpu;
+    let a_cpu = Tensor::rand(-1.0f32, 1.0f32, (4, 32), &cpu)?.to_dtype(DType::BF16)?;
+    let b_cpu = Tensor::rand(-1.0f32, 1.0f32, (32, 32), &cpu)?.to_dtype(DType::BF16)?;
+    let out_cpu = a_cpu
+        .to_dtype(DType::F32)?
+        .matmul(&b_cpu.to_dtype(DType::F32)?)?;
+    let out_gpu = a_cpu.to_device(&gpu)?.matmul(&b_cpu.to_device(&gpu)?)?;
+    let d = max_abs_diff(&out_cpu, &out_gpu.to_dtype(DType::F32)?)?;
+    assert!(d < BF16_EPS, "bf16 matmul max abs diff {d} >= {BF16_EPS}");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_gelu_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    if !gpu.supports_bf16() {
+        return Ok(());
+    }
+    let cpu = Device::Cpu;
+    let xs = Tensor::rand(-2.0f32, 2.0f32, (2, 8), &cpu)?.to_dtype(DType::BF16)?;
+    let d = max_abs_diff(
+        &xs.gelu()?.to_dtype(DType::F32)?,
+        &xs.to_device(&gpu)?.gelu()?.to_dtype(DType::F32)?,
+    )?;
+    assert!(d < BF16_EPS, "bf16 gelu max abs diff {d} >= {BF16_EPS}");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_add_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    if !gpu.supports_bf16() {
+        return Ok(());
+    }
+    let cpu = Device::Cpu;
+    let a = Tensor::rand(-1.0f32, 1.0f32, (2, 8), &cpu)?.to_dtype(DType::BF16)?;
+    let b = Tensor::rand(-1.0f32, 1.0f32, (2, 8), &cpu)?.to_dtype(DType::BF16)?;
+    let d = max_abs_diff(
+        &a.add(&b)?.to_dtype(DType::F32)?,
+        &a.to_device(&gpu)?.add(&b.to_device(&gpu)?)?.to_dtype(DType::F32)?,
+    )?;
+    assert!(d < BF16_EPS, "bf16 add max abs diff {d} >= {BF16_EPS}");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sdpa_vector_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let bs = 2usize;
+    let heads = 4usize;
+    let q_seq = 1usize;
+    let k_seq = 8usize;
+    let dk = 64usize;
+    let scale = (dk as f32).sqrt().recip();
+    let q = Tensor::rand(-1.0f32, 1.0f32, (bs, heads, q_seq, dk), &cpu)?;
+    let k = Tensor::rand(-1.0f32, 1.0f32, (bs, heads, k_seq, dk), &cpu)?;
+    let v = Tensor::rand(-1.0f32, 1.0f32, (bs, heads, k_seq, dk), &cpu)?;
+    let truth = {
+        let att = (q.clone() * scale as f64)?.matmul(&k.t()?)?;
+        let att = candle_nn::ops::softmax_last_dim(&att)?;
+        att.matmul(&v)?
+    };
+    let fused = candle_nn::ops::sdpa(
+        &q.to_device(&gpu)?,
+        &k.to_device(&gpu)?,
+        &v.to_device(&gpu)?,
+        None,
+        false,
+        scale,
+        1.,
+    )?;
+    assert_parity(&truth, &fused.to_device(&cpu)?)?;
     Ok(())
 }

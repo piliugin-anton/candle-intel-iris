@@ -11,9 +11,10 @@ mod shader_cache;
 mod storage;
 
 pub use crate::wgsl::{
-    BINARY, CAST, COMMON, COPY, COPY2D, ELEM_WORKGROUP_SIZE, MATMUL_NAIVE, MATMUL_TILED,
-    MATMUL_TILED_F16, MATMUL_TILED_VEC, MATMUL_VEC_WIDTH, MATMUL_WORKGROUP_SIZE, QMATMUL_Q4_0,
-    REDUCE, REDUCE_WORKGROUP_SIZE, RMS_NORM, ROPE, UNARY, WHERE_COND,
+    BINARY, BINARY_BF16, CAST, COMMON, COPY, COPY2D, ELEM_WORKGROUP_SIZE, MATMUL_NAIVE,
+    MATMUL_TILED, MATMUL_TILED_BF16, MATMUL_TILED_F16, MATMUL_TILED_VEC, MATMUL_VEC_WIDTH,
+    MATMUL_WORKGROUP_SIZE, QMATMUL_Q4_0, QMATMUL_Q4_K, QMATMUL_Q8_0, REDUCE, REDUCE_WORKGROUP_SIZE,
+    RMS_NORM, ROPE, SDPA_VECTOR, SOFTMAX, UNARY, UNARY_BF16, WHERE_COND,
 };
 pub use adapter::{is_intel_adapter, WgpuDeviceConfig, INTEL_VENDOR_ID};
 pub use allocator::Allocator;
@@ -32,9 +33,10 @@ pub use mapped_buffer::{MappedBacking, MAPPED_READ_USAGE};
 pub use shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
 pub use async_io::wait_for_buffer_map;
 pub use ops::{
-    dispatch_copy2d, dispatch_copy_strided_src, dispatch_qmatmul_q4_0, dispatch_rms_norm_f32,
-    Copy2dParams,
-    dispatch_rope_f32, dispatch_where_u8_f32, upload_q4_0_weights,
+    dispatch_copy2d, dispatch_copy_strided_src, dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k,
+    dispatch_qmatmul_q8_0, dispatch_rms_norm_f32, dispatch_sdpa_vector_f32,
+    dispatch_softmax_last_dim_f32, Copy2dParams, dispatch_rope_f32, dispatch_where_u8_f32,
+    upload_q4_0_weights, upload_quant_weights,
 };
 pub use storage::{buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
 
@@ -238,7 +240,8 @@ impl BackendDevice for WgpuDevice {
     }
 
     fn storage_from_slice<T: crate::WithDType>(&self, s: &[T]) -> CandleResult<Self::Storage> {
-        self.storage_from_cpu_storage(&T::to_cpu_storage(s))
+        let bytes = storage::typed_slice_as_bytes(s);
+        WgpuStorage::from_bytes(self, bytes, s.len(), T::DTYPE).map_err(Error::from)
     }
 
     fn storage_from_cpu_storage(&self, storage: &CpuStorage) -> CandleResult<Self::Storage> {

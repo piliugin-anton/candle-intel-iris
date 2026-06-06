@@ -2,8 +2,8 @@ use super::{GgmlDType, QStorage};
 use crate::custom_op::CustomOp1;
 use crate::quantized::k_quants::GgmlType;
 use crate::wgpu_device::{
-    dispatch_qmatmul_q4_0, upload_q4_0_weights, wait_for_buffer_map, WgpuStorage,
-    STORAGE_BUFFER_USAGE,
+    dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k, dispatch_qmatmul_q8_0, upload_quant_weights,
+    wait_for_buffer_map, WgpuStorage, STORAGE_BUFFER_USAGE,
 };
 use crate::{backend::BackendStorage, CpuStorage, DType, Layout, Result, Shape, WgpuDevice};
 use std::sync::Arc;
@@ -137,13 +137,15 @@ impl QWgpuStorage {
         storage: &WgpuStorage,
         layout: &Layout,
     ) -> Result<(WgpuStorage, Shape)> {
-        if self.dtype == GgmlDType::Q4_0 {
-            return self.fwd_q4_0(self_shape, storage, layout);
+        match self.dtype {
+            GgmlDType::Q4_0 | GgmlDType::Q8_0 | GgmlDType::Q4K => {
+                self.fwd_qmatmul(self_shape, storage, layout)
+            }
+            _ => self.fwd_via_cpu(self_shape, storage, layout),
         }
-        self.fwd_via_cpu(self_shape, storage, layout)
     }
 
-    fn fwd_q4_0(
+    fn fwd_qmatmul(
         &self,
         self_shape: &Shape,
         storage: &WgpuStorage,
@@ -175,12 +177,12 @@ impl QWgpuStorage {
         dst_shape.push(n);
         let dst_shape = Shape::from(dst_shape);
 
-        let out = dispatch_qmatmul_q4_0(
-            storage,
-            &self.buffer,
-            (1, m, n, k),
-            layout,
-        )?;
+        let out = match self.dtype {
+            GgmlDType::Q4_0 => dispatch_qmatmul_q4_0(storage, &self.buffer, (1, m, n, k), layout)?,
+            GgmlDType::Q8_0 => dispatch_qmatmul_q8_0(storage, &self.buffer, (1, m, n, k), layout)?,
+            GgmlDType::Q4K => dispatch_qmatmul_q4_k(storage, &self.buffer, (1, m, n, k), layout)?,
+            other => crate::bail!("unsupported wgpu qmatmul dtype {other:?}"),
+        };
         Ok((out, dst_shape))
     }
 
@@ -216,7 +218,7 @@ pub fn load_quantized<T: GgmlType + Send + Sync + 'static>(
     let bytes = unsafe {
         std::slice::from_raw_parts(data.as_ptr().cast(), std::mem::size_of_val(data))
     };
-    let buffer = upload_q4_0_weights(device, bytes)?;
+    let buffer = upload_quant_weights(device, bytes)?;
     Ok(QStorage::Wgpu(Box::new(QWgpuStorage {
         dtype: T::DTYPE,
         device: device.clone(),

@@ -107,7 +107,7 @@ impl IntelCaps {
     }
 
     pub fn supports_native_bf16(&self) -> bool {
-        self.generation == IntelGeneration::Gen12Plus && self.supports_shader_bf16
+        self.generation == IntelGeneration::Gen12Plus
     }
 
     pub fn supports_native_f16(&self) -> bool {

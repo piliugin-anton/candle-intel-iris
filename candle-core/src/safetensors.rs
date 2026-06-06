@@ -112,7 +112,34 @@ impl Tensor {
     }
 }
 
+#[cfg(feature = "wgpu")]
+fn convert_slice_wgpu<T: WithDType>(data: &[u8], shape: &[usize], device: &crate::WgpuDevice) -> Result<Tensor> {
+    use crate::storage::Storage;
+    use crate::wgpu_device::WgpuStorage;
+
+    let size_in_bytes = T::DTYPE.size_in_bytes();
+    let elem_count = data.len() / size_in_bytes;
+    if (data.as_ptr() as usize).is_multiple_of(size_in_bytes) {
+        let storage = WgpuStorage::from_bytes(device, data, elem_count, T::DTYPE)?;
+        let op = BackpropOp::none();
+        Ok(from_storage(Storage::from_wgpu(storage), shape, op, false))
+    } else {
+        let mut c: Vec<T> = Vec::with_capacity(elem_count);
+        // SAFETY: `c` is contiguous and does not overlap `data`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), c.as_mut_ptr() as *mut u8, data.len());
+            c.set_len(elem_count)
+        }
+        Tensor::from_slice(&c, shape, &Device::Wgpu(Box::new(device.clone())))
+    }
+}
+
 fn convert_slice<T: WithDType>(data: &[u8], shape: &[usize], device: &Device) -> Result<Tensor> {
+    #[cfg(feature = "wgpu")]
+    if let Device::Wgpu(wgpu_dev) = device {
+        return convert_slice_wgpu::<T>(data, shape, wgpu_dev);
+    }
+
     let size_in_bytes = T::DTYPE.size_in_bytes();
     let elem_count = data.len() / size_in_bytes;
     if (data.as_ptr() as usize).is_multiple_of(size_in_bytes) {
@@ -275,10 +302,11 @@ impl Tensor {
                         return Err(Error::Msg("Metal support not compiled".to_string()));
                     }
                     #[cfg(feature = "wgpu")]
-                    Device::Wgpu(_) => {
-                        return Err(Error::Msg(
-                            "wgpu safetensors load not yet implemented".to_string(),
-                        ));
+                    Device::Wgpu(device) => {
+                        use crate::wgpu_device::WgpuStorage;
+                        let elem_count: usize = shape.iter().product();
+                        let storage = WgpuStorage::from_bytes(device, data, elem_count, dtype)?;
+                        Storage::from_wgpu(storage)
                     }
                 };
 
@@ -377,10 +405,11 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
             return Err(Error::Msg("Metal support not compiled".to_string()));
         }
         #[cfg(feature = "wgpu")]
-        Device::Wgpu(_) => {
-            return Err(Error::Msg(
-                "wgpu safetensors load not yet implemented".to_string(),
-            ));
+        Device::Wgpu(device) => {
+            use crate::wgpu_device::WgpuStorage;
+            let elem_count: usize = shape.iter().product();
+            let storage = WgpuStorage::from_bytes(device, data, elem_count, dtype)?;
+            Storage::from_wgpu(storage)
         }
     };
 
@@ -652,5 +681,21 @@ mod tests {
         let data: Vec<u8> = tensor.to_vec1().unwrap();
         assert_eq!(data, vec![1, 3]);
         std::fs::remove_file("test_u8.safetensors").unwrap();
+    }
+
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn load_f32_wgpu_noop_device() {
+        use crate::WgpuDevice;
+
+        let cpu = Tensor::from_vec(vec![1.0f32, 2.0], (2,), &Device::Cpu).unwrap();
+        cpu.save_safetensors("x", "test_wgpu.safetensors").unwrap();
+        let device = Device::Wgpu(Box::new(WgpuDevice::new_test(true, 1024)));
+        let weights = load("test_wgpu.safetensors", &device).unwrap();
+        let tensor = weights.get("x").unwrap();
+        assert_eq!(tensor.dims(), &[2]);
+        assert_eq!(tensor.dtype(), DType::F32);
+        assert!(tensor.device().is_wgpu());
+        std::fs::remove_file("test_wgpu.safetensors").unwrap();
     }
 }

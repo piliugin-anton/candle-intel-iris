@@ -1,82 +1,26 @@
 use super::bind_group::{
-    BindGroupBuilder, Copy2dUniforms, KernelUniforms, MatMulUniforms,
-    QMatMulUniforms, ReduceUniforms, RmsNormUniforms, RopeUniforms, WhereUniforms,
+    BindGroupBuilder, Copy2dUniforms, KernelUniforms, MatMulUniforms, QMatMulUniforms,
+    ReduceUniforms, RmsNormUniforms, RopeUniforms, SdpaUniforms, SoftmaxUniforms, WhereUniforms,
 };
 use super::error::{Result, WgpuError};
 use super::intel_caps::{tune_matmul_shader_source, IntelGeneration};
 use super::kernel::WgpuKernel;
 use super::storage::{buffer_offset, BufferOffset, WgpuStorage};
 use super::WgpuDevice;
-use crate::backend::{BackendDevice, BackendStorage};
+use crate::backend::BackendStorage;
 use crate::op::{BinaryOpT, ReduceOp, UnaryOpT};
 use crate::wgsl::{
-    BINARY, COPY, COPY2D, MATMUL_NAIVE, MATMUL_TILED, MATMUL_TILED_F16, MATMUL_TILED_VEC,
-    MATMUL_VEC_WIDTH, QMATMUL_Q4_0, REDUCE, RMS_NORM, ROPE, UNARY, WHERE_COND,
+    BINARY, BINARY_BF16, COPY, COPY2D, MATMUL_NAIVE, MATMUL_TILED, MATMUL_TILED_BF16,
+    MATMUL_TILED_F16, MATMUL_TILED_VEC, MATMUL_VEC_WIDTH, QMATMUL_Q4_0, QMATMUL_Q4_K,
+    QMATMUL_Q8_0, REDUCE, RMS_NORM, ROPE, SDPA_VECTOR, SOFTMAX, UNARY, UNARY_BF16, WHERE_COND,
 };
 use crate::{CpuStorage, DType, Error, Layout, Result as CandleResult, Shape};
 use std::sync::Arc;
 use wgpu::BufferUsages;
 
-fn layout_has_broadcast(layout: &Layout) -> bool {
-    layout.stride().contains(&0)
-}
-
-/// Expands broadcast/strided layouts to contiguous GPU storage for elem-wise kernels.
-fn materialize_if_needed(
-    storage: &WgpuStorage,
-    layout: &Layout,
-    device: &WgpuDevice,
-) -> Result<(WgpuStorage, Layout)> {
-    if !layout_has_broadcast(layout) && layout.is_contiguous() {
-        return Ok((storage.clone(), layout.clone()));
-    }
-    let cpu = storage
-        .to_cpu_storage()
-        .map_err(|e| WgpuError::Message(e.to_string()))?;
-    let CpuStorage::F32(src) = cpu else {
-        return Err(WgpuError::Message(
-            "wgpu materialize only supports f32".into(),
-        ));
-    };
-    let shape = layout.shape();
-    let dims = shape.dims();
-    let strides = layout.stride();
-    let start = layout.start_offset();
-    let mut dst = vec![0f32; shape.elem_count()];
-
-    // Fast path: one broadcast dimension with stride 0 (common for softmax).
-    if dims.len() == 2 && strides[1] == 0 {
-        let n = dims[0];
-        let m = dims[1];
-        let row_stride = strides[0];
-        for i in 0..n {
-            let v = src[start + i * row_stride];
-            let base = i * m;
-            for j in 0..m {
-                dst[base + j] = v;
-            }
-        }
-    } else if dims.len() == 3 && strides[2] == 0 {
-        let d1 = dims[1];
-        let d2 = dims[2];
-        let row_stride = strides[1];
-        for j in 0..d1 {
-            let v = src[start + j * row_stride];
-            let base = j * d2;
-            for k in 0..d2 {
-                dst[base + k] = v;
-            }
-        }
-    } else {
-        for (flat_i, src_i) in layout.strided_index().enumerate() {
-            dst[flat_i] = src[src_i];
-        }
-    }
-    let out = WgpuStorage::from_cpu(device, &CpuStorage::F32(dst))?;
-    device
-        .synchronize()
-        .map_err(|e| WgpuError::Message(e.to_string()))?;
-    Ok((out, Layout::contiguous(shape)))
+fn elemwise_workgroup_count(device: &WgpuDevice, elem_count: usize) -> u32 {
+    let wg = device.caps().elem_workgroup_size;
+    (elem_count as u32).div_ceil(wg)
 }
 
 fn require_f32(dtype: DType, op: &'static str) -> CandleResult<()> {
@@ -89,7 +33,7 @@ fn require_f32(dtype: DType, op: &'static str) -> CandleResult<()> {
 
 fn require_matmul_dtype(dtype: DType, op: &'static str) -> CandleResult<()> {
     match dtype {
-        DType::F32 | DType::F16 => Ok(()),
+        DType::F32 | DType::F16 | DType::BF16 => Ok(()),
         other => Err(Error::UnsupportedDTypeForOp(other, op).bt()),
     }
 }
@@ -102,6 +46,8 @@ enum MatMulKernel {
     TiledVecF32,
     TiledF16,
     TiledVecF16,
+    TiledBf16,
+    TiledVecBf16,
 }
 
 fn select_matmul_kernel(
@@ -129,6 +75,13 @@ fn select_matmul_kernel(
                 MatMulKernel::TiledF16
             }
         }
+        DType::BF16 if caps.supports_native_bf16() => {
+            if tiled && vec_aligned && large_enough {
+                MatMulKernel::TiledVecBf16
+            } else {
+                MatMulKernel::TiledBf16
+            }
+        }
         _ => {
             if tiled && vec_aligned && large_enough {
                 MatMulKernel::TiledVecF32
@@ -147,6 +100,7 @@ fn matmul_shader_source(kernel: MatMulKernel) -> &'static str {
         MatMulKernel::TiledF32 => MATMUL_TILED,
         MatMulKernel::TiledVecF32 => MATMUL_TILED_VEC,
         MatMulKernel::TiledF16 | MatMulKernel::TiledVecF16 => MATMUL_TILED_F16,
+        MatMulKernel::TiledBf16 | MatMulKernel::TiledVecBf16 => MATMUL_TILED_BF16,
     }
 }
 
@@ -157,6 +111,8 @@ fn matmul_entry_point(kernel: MatMulKernel) -> &'static str {
         MatMulKernel::TiledVecF32 => "matmul_tiled_vec_f32",
         MatMulKernel::TiledF16 => "matmul_tiled_f16",
         MatMulKernel::TiledVecF16 => "matmul_tiled_vec_f16",
+        MatMulKernel::TiledBf16 => "matmul_tiled_bf16",
+        MatMulKernel::TiledVecBf16 => "matmul_tiled_vec_bf16",
     }
 }
 
@@ -198,6 +154,30 @@ fn binary_entry_point(kernel: &str) -> Option<&'static str> {
     }
 }
 
+fn unary_entry_point_bf16(kernel: &str) -> Option<&'static str> {
+    match kernel {
+        "uexp" => Some("exp_bf16"),
+        "uneg" => Some("neg_bf16"),
+        "usilu" => Some("silu_bf16"),
+        "usigmoid" => Some("sigmoid_bf16"),
+        "ugelu" => Some("gelu_bf16"),
+        "ugelu_erf" => Some("gelu_erf_bf16"),
+        "utanh" => Some("tanh_bf16"),
+        "usqr" => Some("sqr_bf16"),
+        _ => None,
+    }
+}
+
+fn binary_entry_point_bf16(kernel: &str) -> Option<&'static str> {
+    match kernel {
+        "badd" => Some("add_bf16"),
+        "bsub" => Some("sub_bf16"),
+        "bmul" => Some("mul_bf16"),
+        "bdiv" => Some("div_bf16"),
+        _ => None,
+    }
+}
+
 fn reduce_entry_point(op: ReduceOp) -> Option<&'static str> {
     match op {
         ReduceOp::Sum => Some("reduce_sum_f32"),
@@ -213,8 +193,13 @@ fn compile_elemwise_kernel(
     source: &str,
     entry_point: &str,
 ) -> Result<WgpuKernel> {
-    // Elem-wise shaders use @workgroup_size(1) with one workgroup per element.
-    WgpuKernel::compile_with_workgroup_size(device, source, entry_point, 1)
+    let tuned = super::intel_caps::tune_shader_source(source, device.caps());
+    WgpuKernel::compile_with_workgroup_size(
+        device,
+        &tuned,
+        entry_point,
+        device.caps().elem_workgroup_size,
+    )
 }
 
 struct ElemwiseDispatch<'a> {
@@ -259,8 +244,8 @@ fn dispatch_elemwise(args: ElemwiseDispatch<'_>) -> Result<()> {
         in1_offset,
         uniforms.as_bytes(),
     )?;
-    let elem_count = out_layout.shape().elem_count() as u32;
-    backing.with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [elem_count, 1, 1]))
+    let grid = elemwise_workgroup_count(device, out_layout.shape().elem_count());
+    backing.with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
 }
 
 fn compile_matmul_kernel(device: &WgpuDevice, kernel: MatMulKernel) -> Result<WgpuKernel> {
@@ -312,10 +297,10 @@ pub fn dispatch_affine(
             uniforms.as_bytes(),
         )
         .map_err(Error::from)?;
-    let elem_count = out_layout.shape().elem_count() as u32;
+    let grid = elemwise_workgroup_count(&device, out_layout.shape().elem_count());
     storage
         .backing()
-        .with_unmapped(|| kernel.dispatch_bind_group(&device, &bind_group, [elem_count, 1, 1]))
+        .with_unmapped(|| kernel.dispatch_bind_group(&device, &bind_group, [grid, 1, 1]))
         .map_err(Error::from)?;
     Ok(out)
 }
@@ -324,7 +309,53 @@ pub fn dispatch_unary<B: UnaryOpT>(
     storage: &WgpuStorage,
     layout: &Layout,
 ) -> CandleResult<WgpuStorage> {
-    require_f32(storage.dtype(), B::NAME)?;
+    let dtype = storage.dtype();
+    let device = storage.device().clone();
+    if dtype == DType::BF16 {
+        if device.caps().supports_native_bf16() {
+            let entry = unary_entry_point_bf16(B::KERNEL).ok_or_else(|| {
+                WgpuError::Message(format!(
+                    "wgpu bf16 unary kernel not available for op {}",
+                    B::NAME
+                ))
+            })?;
+            let out_shape = layout.shape();
+            let out = WgpuStorage::alloc(&device, out_shape, DType::BF16)?;
+            let out_layout = Layout::contiguous(out_shape);
+            let kernel =
+                WgpuKernel::compile_with_workgroup_size(&device, UNARY_BF16, entry, 1)
+                    .map_err(Error::from)?;
+            let uniforms = KernelUniforms::new(
+                out_layout.shape().elem_count(),
+                &out_layout,
+                layout,
+                None,
+            );
+            let bind_group_builder = BindGroupBuilder::new();
+            let in0_offset = buffer_offset(storage, layout);
+            let bind_group = bind_group_builder
+                .create_bind_group_bytes(
+                    device.device(),
+                    device.queue(),
+                    buffer_offset(&out, &out_layout),
+                    in0_offset.clone(),
+                    None,
+                    uniforms.as_bytes(),
+                )
+                .map_err(Error::from)?;
+            storage
+                .backing()
+                .with_unmapped(|| kernel.dispatch_bind_group(&device, &bind_group, [1, 1, 1]))
+                .map_err(Error::from)?;
+            return Ok(out);
+        }
+        let f32 = storage.to_dtype(layout, DType::F32)?;
+        let f32_layout = Layout::contiguous(layout.shape());
+        let out_f32 = dispatch_unary::<B>(&f32, &f32_layout)?;
+        return out_f32.to_dtype(layout, DType::BF16);
+    }
+
+    require_f32(dtype, B::NAME)?;
     let entry = unary_entry_point(B::KERNEL).ok_or_else(|| {
         WgpuError::Message(format!(
             "wgpu unary kernel not available for op {}",
@@ -332,7 +363,6 @@ pub fn dispatch_unary<B: UnaryOpT>(
         ))
     })?;
 
-    let device = storage.device().clone();
     let out_shape = layout.shape();
     let out = WgpuStorage::alloc(&device, out_shape, DType::F32)?;
     let out_layout = Layout::contiguous(out_shape);
@@ -357,8 +387,59 @@ pub fn dispatch_binary<B: BinaryOpT>(
     lhs_layout: &Layout,
     rhs_layout: &Layout,
 ) -> CandleResult<WgpuStorage> {
-    require_f32(lhs.dtype(), B::NAME)?;
-    require_f32(rhs.dtype(), B::NAME)?;
+    let dtype = lhs.dtype();
+    if dtype != rhs.dtype() {
+        return Err(Error::UnsupportedDTypeForOp(dtype, B::NAME).bt());
+    }
+    let device = lhs.device().clone();
+    if dtype == DType::BF16 {
+        if device.caps().supports_native_bf16() {
+            let entry = binary_entry_point_bf16(B::KERNEL).ok_or_else(|| {
+                WgpuError::Message(format!(
+                    "wgpu bf16 binary kernel not available for op {}",
+                    B::NAME
+                ))
+            })?;
+            let out_shape = lhs_layout.shape();
+            let out = WgpuStorage::alloc(&device, out_shape, DType::BF16)?;
+            let out_layout = Layout::contiguous(out_shape);
+            let kernel =
+                WgpuKernel::compile_with_workgroup_size(&device, BINARY_BF16, entry, 1)
+                    .map_err(Error::from)?;
+            let uniforms = KernelUniforms::new(
+                out_layout.shape().elem_count(),
+                &out_layout,
+                lhs_layout,
+                Some(rhs_layout),
+            );
+            let bind_group_builder = BindGroupBuilder::new();
+            let in0_offset = buffer_offset(lhs, lhs_layout);
+            let in1_offset = buffer_offset(rhs, rhs_layout);
+            let bind_group = bind_group_builder
+                .create_bind_group_bytes(
+                    device.device(),
+                    device.queue(),
+                    buffer_offset(&out, &out_layout),
+                    in0_offset,
+                    Some(in1_offset),
+                    uniforms.as_bytes(),
+                )
+                .map_err(Error::from)?;
+            lhs.backing()
+                .with_unmapped(|| kernel.dispatch_bind_group(&device, &bind_group, [1, 1, 1]))
+                .map_err(Error::from)?;
+            return Ok(out);
+        }
+        let lhs_f32 = lhs.to_dtype(lhs_layout, DType::F32)?;
+        let rhs_f32 = rhs.to_dtype(rhs_layout, DType::F32)?;
+        let lhs_layout = Layout::contiguous(lhs_layout.shape());
+        let rhs_layout = Layout::contiguous(rhs_layout.shape());
+        let out_f32 = dispatch_binary::<B>(&lhs_f32, &rhs_f32, &lhs_layout, &rhs_layout)?;
+        let out_layout = Layout::contiguous(lhs_layout.shape());
+        return out_f32.to_dtype(&out_layout, DType::BF16);
+    }
+
+    require_f32(dtype, B::NAME)?;
     let entry = binary_entry_point(B::KERNEL).ok_or_else(|| {
         WgpuError::Message(format!(
             "wgpu binary kernel not available for op {}",
@@ -366,9 +447,6 @@ pub fn dispatch_binary<B: BinaryOpT>(
         ))
     })?;
 
-    let device = lhs.device().clone();
-    let (lhs, lhs_layout) = materialize_if_needed(lhs, lhs_layout, &device).map_err(Error::from)?;
-    let (rhs, rhs_layout) = materialize_if_needed(rhs, rhs_layout, &device).map_err(Error::from)?;
     let out_shape = lhs_layout.shape();
     let out = WgpuStorage::alloc(&device, out_shape, DType::F32)?;
     let out_layout = Layout::contiguous(out_shape);
@@ -378,9 +456,9 @@ pub fn dispatch_binary<B: BinaryOpT>(
         entry_point: entry,
         out: &out,
         out_layout: &out_layout,
-        in0: &lhs,
-        in0_layout: &lhs_layout,
-        in1: Some((&rhs, &rhs_layout)),
+        in0: lhs,
+        in0_layout: lhs_layout,
+        in1: Some((rhs, rhs_layout)),
         backing: lhs.backing(),
     })
     .map_err(Error::from)?;
@@ -427,6 +505,32 @@ pub fn dispatch_matmul(
         )?;
         let out_layout = Layout::contiguous(&out_shape);
         return out_f32.to_dtype(&out_layout, DType::F16);
+    }
+
+    if storage_dtype == DType::BF16 {
+        // Packed bf16 tiles need atomic stores for parallel output; use f32 tiles + cast for P1.
+        let lhs_f32 = lhs.to_dtype(lhs_layout, DType::F32)?;
+        let rhs_f32 = rhs.to_dtype(rhs_layout, DType::F32)?;
+        let lhs_layout = Layout::contiguous(lhs_layout.shape());
+        let rhs_layout = Layout::contiguous(rhs_layout.shape());
+        let out_shape = {
+            let lhs_dims = lhs_layout.shape().dims();
+            let dim = lhs_dims.len();
+            let mut out_dims = lhs_dims[..dim - 2].to_vec();
+            out_dims.push(m);
+            out_dims.push(n);
+            Shape::from(out_dims)
+        };
+        let out_f32 = dispatch_matmul_inner(
+            &lhs_f32,
+            &rhs_f32,
+            (b, m, n, k),
+            &lhs_layout,
+            &rhs_layout,
+            DType::F32,
+        )?;
+        let out_layout = Layout::contiguous(&out_shape);
+        return out_f32.to_dtype(&out_layout, DType::BF16);
     }
 
     dispatch_matmul_inner(lhs, rhs, (b, m, n, k), lhs_layout, rhs_layout, storage_dtype)
@@ -478,23 +582,27 @@ fn dispatch_matmul_inner(
     Ok(out)
 }
 
-fn compile_qmatmul_kernel(device: &WgpuDevice) -> Result<WgpuKernel> {
-    WgpuKernel::compile_with_workgroup_size(device, QMATMUL_Q4_0, "qmatmul_q4_0_f32", 8)
+fn compile_qmatmul_kernel(
+    device: &WgpuDevice,
+    source: &str,
+    entry_point: &str,
+) -> Result<WgpuKernel> {
+    WgpuKernel::compile_with_workgroup_size(device, source, entry_point, 8)
 }
 
-/// Quantized Q4_0 matrix multiply: `dst = lhs @ rhs^T` with f32 activations.
-///
-/// `rhs` is a raw Q4_0 buffer (GGML block layout, shape n × k).
-pub fn dispatch_qmatmul_q4_0(
+fn dispatch_qmatmul(
     lhs: &WgpuStorage,
     rhs_buffer: &Arc<wgpu::Buffer>,
     (b, m, n, k): (usize, usize, usize, usize),
     lhs_layout: &Layout,
+    source: &str,
+    entry_point: &str,
+    k_block: usize,
 ) -> CandleResult<WgpuStorage> {
     require_f32(lhs.dtype(), "qmatmul")?;
-    if !k.is_multiple_of(32) {
+    if !k.is_multiple_of(k_block) {
         return Err(WgpuError::Message(format!(
-            "qmatmul k={k} must be divisible by 32"
+            "qmatmul k={k} must be divisible by {k_block}"
         ))
         .into());
     }
@@ -510,7 +618,7 @@ pub fn dispatch_qmatmul_q4_0(
     let out = WgpuStorage::alloc(&device, &out_shape, DType::F32)?;
 
     let uniforms = QMatMulUniforms::new(b, m, n, k);
-    let kernel = compile_qmatmul_kernel(&device).map_err(Error::from)?;
+    let kernel = compile_qmatmul_kernel(&device, source, entry_point).map_err(Error::from)?;
     let bind_group_builder = BindGroupBuilder::new();
     let bind_group = bind_group_builder
         .create_bind_group_bytes(
@@ -538,16 +646,75 @@ pub fn dispatch_qmatmul_q4_0(
     Ok(out)
 }
 
-/// Upload Q4_0 weight bytes to a GPU storage buffer.
-pub fn upload_q4_0_weights(device: &WgpuDevice, bytes: &[u8]) -> Result<Arc<wgpu::Buffer>> {
+/// Quantized Q4_0 matrix multiply: `dst = lhs @ rhs^T` with f32 activations.
+pub fn dispatch_qmatmul_q4_0(
+    lhs: &WgpuStorage,
+    rhs_buffer: &Arc<wgpu::Buffer>,
+    dims: (usize, usize, usize, usize),
+    lhs_layout: &Layout,
+) -> CandleResult<WgpuStorage> {
+    dispatch_qmatmul(
+        lhs,
+        rhs_buffer,
+        dims,
+        lhs_layout,
+        QMATMUL_Q4_0,
+        "qmatmul_q4_0_f32",
+        32,
+    )
+}
+
+/// Quantized Q8_0 matrix multiply: `dst = lhs @ rhs^T` with f32 activations.
+pub fn dispatch_qmatmul_q8_0(
+    lhs: &WgpuStorage,
+    rhs_buffer: &Arc<wgpu::Buffer>,
+    dims: (usize, usize, usize, usize),
+    lhs_layout: &Layout,
+) -> CandleResult<WgpuStorage> {
+    dispatch_qmatmul(
+        lhs,
+        rhs_buffer,
+        dims,
+        lhs_layout,
+        QMATMUL_Q8_0,
+        "qmatmul_q8_0_f32",
+        32,
+    )
+}
+
+/// Quantized Q4_K matrix multiply: `dst = lhs @ rhs^T` with f32 activations.
+pub fn dispatch_qmatmul_q4_k(
+    lhs: &WgpuStorage,
+    rhs_buffer: &Arc<wgpu::Buffer>,
+    dims: (usize, usize, usize, usize),
+    lhs_layout: &Layout,
+) -> CandleResult<WgpuStorage> {
+    dispatch_qmatmul(
+        lhs,
+        rhs_buffer,
+        dims,
+        lhs_layout,
+        QMATMUL_Q4_K,
+        "qmatmul_q4_k_f32",
+        256,
+    )
+}
+
+/// Upload quantized weight bytes to a GPU storage buffer.
+pub fn upload_quant_weights(device: &WgpuDevice, bytes: &[u8]) -> Result<Arc<wgpu::Buffer>> {
     let buffer = device.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("candle q4_0 weights"),
+        label: Some("candle quant weights"),
         size: bytes.len() as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     device.queue().write_buffer(&buffer, 0, bytes);
     Ok(Arc::new(buffer))
+}
+
+/// Upload Q4_0 weight bytes to a GPU storage buffer.
+pub fn upload_q4_0_weights(device: &WgpuDevice, bytes: &[u8]) -> Result<Arc<wgpu::Buffer>> {
+    upload_quant_weights(device, bytes)
 }
 
 pub fn dispatch_reduce(
@@ -850,6 +1017,134 @@ pub fn dispatch_where_u8_f32(
     Ok(out)
 }
 
+/// Fused softmax along the last dimension (contiguous f32 input).
+pub fn dispatch_softmax_last_dim_f32(
+    storage: &WgpuStorage,
+    layout: &Layout,
+) -> CandleResult<WgpuStorage> {
+    require_f32(storage.dtype(), "softmax")?;
+    if !layout.is_contiguous() {
+        return Err(Error::Msg("softmax requires contiguous input".into()));
+    }
+    let dims = layout.dims();
+    let last_dim = *dims
+        .last()
+        .ok_or_else(|| Error::Msg("empty tensor in softmax".into()))?;
+    let n_rows = layout.shape().elem_count() / last_dim;
+    let device = storage.device();
+    let out = WgpuStorage::alloc(device, layout.shape(), DType::F32).map_err(Error::from)?;
+    let out_layout = Layout::contiguous(layout.shape());
+    let uniforms = SoftmaxUniforms {
+        n_rows: n_rows as u32,
+        last_dim: last_dim as u32,
+        _pad: [0; 70],
+    };
+    let tuned = super::intel_caps::tune_shader_source(SOFTMAX, device.caps());
+    let kernel =
+        WgpuKernel::compile_with_workgroup_size(device, &tuned, "softmax_last_dim_f32", 32)
+            .map_err(Error::from)?;
+    let in0 = buffer_offset(storage, layout);
+    let bind_group = BindGroupBuilder::new()
+        .create_bind_group_bytes(
+            device.device(),
+            device.queue(),
+            buffer_offset(&out, &out_layout),
+            in0.clone(),
+            Some(in0),
+            uniforms.as_bytes(),
+        )
+        .map_err(Error::from)?;
+    storage
+        .backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [n_rows as u32, 1, 1]))
+        .map_err(Error::from)?;
+    Ok(out)
+}
+
+/// Fused scaled dot-product attention (vector/decode path, f32).
+pub fn dispatch_sdpa_vector_f32(
+    q: &WgpuStorage,
+    k: &WgpuStorage,
+    v: &WgpuStorage,
+    q_layout: &Layout,
+    k_layout: &Layout,
+    v_layout: &Layout,
+    scale: f32,
+    softcapping: f32,
+) -> CandleResult<WgpuStorage> {
+    require_f32(q.dtype(), "sdpa")?;
+    require_f32(k.dtype(), "sdpa")?;
+    require_f32(v.dtype(), "sdpa")?;
+    if !(q_layout.is_contiguous() && k_layout.is_contiguous() && v_layout.is_contiguous()) {
+        return Err(Error::Msg("sdpa_vector requires contiguous q, k, v".into()));
+    }
+
+    let (bs, n_q_heads, q_seq, head_dim) = q_layout.shape().dims4()?;
+    let (k_bs, n_kv_heads, k_seq, k_head) = k_layout.shape().dims4()?;
+    let (v_bs, v_kv_heads, v_k_seq, v_dim) = v_layout.shape().dims4()?;
+
+    if bs != k_bs || bs != v_bs {
+        return Err(Error::Msg("sdpa batch size mismatch".into()));
+    }
+    if n_kv_heads != v_kv_heads || k_seq != v_k_seq || head_dim != k_head {
+        return Err(Error::Msg("sdpa k/v shape mismatch".into()));
+    }
+    if n_q_heads % n_kv_heads != 0 {
+        return Err(Error::Msg("sdpa n_heads must be a multiple of n_kv_heads".into()));
+    }
+    if q_seq > 8 {
+        return Err(Error::Msg(format!(
+            "sdpa_vector supports q_seq <= 8, got {q_seq}"
+        )));
+    }
+    if head_dim != 64 && head_dim != 128 {
+        return Err(Error::Msg(format!(
+            "sdpa_vector supports head_dim 64 or 128, got {head_dim}"
+        )));
+    }
+    if v_dim > 128 {
+        return Err(Error::Msg(format!(
+            "sdpa_vector supports v_dim <= 128, got {v_dim}"
+        )));
+    }
+
+    let out_shape = Shape::from((bs, n_q_heads, q_seq, v_dim));
+    let device = q.device();
+    let out = WgpuStorage::alloc(device, &out_shape, DType::F32).map_err(Error::from)?;
+    let out_layout = Layout::contiguous(&out_shape);
+    let gqa_factor = n_q_heads / n_kv_heads;
+    let uniforms = SdpaUniforms {
+        bs: bs as u32,
+        n_q_heads: n_q_heads as u32,
+        n_kv_heads: n_kv_heads as u32,
+        q_seq: q_seq as u32,
+        k_seq: k_seq as u32,
+        head_dim: head_dim as u32,
+        v_dim: v_dim as u32,
+        gqa_factor: gqa_factor as u32,
+        scale_bits: scale.to_bits(),
+        softcapping_bits: softcapping.to_bits(),
+        _pad: [0; 62],
+    };
+    let kernel =
+        WgpuKernel::compile_extended(device, SDPA_VECTOR, "sdpa_vector_f32", 1).map_err(Error::from)?;
+    let bind_group = kernel
+        .create_extended_bind_group(
+            device,
+            buffer_offset(&out, &out_layout),
+            buffer_offset(q, q_layout),
+            buffer_offset(k, k_layout),
+            buffer_offset(v, v_layout),
+            uniforms.as_bytes(),
+        )
+        .map_err(Error::from)?;
+    let grid = (bs * n_q_heads * q_seq) as u32;
+    q.backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
+        .map_err(Error::from)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,19 +1195,60 @@ mod tests {
     }
 
     #[test]
-    fn materialize_broadcast_3d_layout() {
-        let layout = Layout::contiguous(&Shape::from((1, 8, 1)))
+    fn binary_broadcast_dispatches_on_noop_device() {
+        use crate::op::Add;
+
+        let device = super::super::WgpuDevice::new_test(true, 1024);
+        let lhs = WgpuStorage::from_cpu(
+            &device,
+            &CpuStorage::F32((0..8).map(|i| i as f32).collect()),
+        )
+        .unwrap();
+        let lhs_layout = Layout::contiguous(&Shape::from((1, 8, 1)))
             .broadcast_as(Shape::from((1, 8, 16)))
             .unwrap();
-        let src: Vec<f32> = (0..8).map(|i| i as f32).collect();
-        let mut dst = vec![0f32; 128];
-        for (flat_i, src_i) in layout.strided_index().enumerate() {
-            dst[flat_i] = src[src_i];
-        }
-        assert_eq!(dst[0], 0.0);
-        assert_eq!(dst[15], 0.0);
-        assert_eq!(dst[16], 1.0);
-        assert_eq!(dst[31], 1.0);
-        assert_eq!(dst[32], 2.0);
+        let rhs = WgpuStorage::from_cpu(&device, &CpuStorage::F32(vec![1.0; 128])).unwrap();
+        let rhs_layout = Layout::contiguous(&Shape::from((1, 8, 16)));
+        dispatch_binary::<Add>(&lhs, &rhs, &lhs_layout, &rhs_layout).unwrap();
+    }
+
+    #[test]
+    fn elemwise_kernel_uses_adapter_workgroup_size() {
+        let device = super::super::WgpuDevice::new_test(true, 1024);
+        let kernel = compile_elemwise_kernel(&device, UNARY, "exp_f32").unwrap();
+        let wg = device.caps().elem_workgroup_size;
+        assert_eq!(kernel.workgroup_size(), wg);
+        assert_eq!(elemwise_workgroup_count(&device, 100), 100u32.div_ceil(wg));
+    }
+
+    #[test]
+    fn cast_bf16_roundtrip_noop_device() {
+        let device = super::super::WgpuDevice::new_test(true, 1024);
+        let storage = WgpuStorage::from_cpu(
+            &device,
+            &CpuStorage::F32(vec![1.0, -2.5, 0.0, 3.25]),
+        )
+        .unwrap();
+        let layout = Layout::contiguous(&Shape::from((4,)));
+        let bf16 = storage.to_dtype(&layout, DType::BF16).unwrap();
+        let back = bf16.to_dtype(&layout, DType::F32).unwrap();
+        let cpu = back.to_cpu_storage().unwrap();
+        let CpuStorage::F32(v) = cpu else {
+            panic!("expected f32");
+        };
+        assert_eq!(v.len(), 4);
+    }
+
+    #[test]
+    fn p1_shaders_compile_on_noop_device() {
+        let device = super::super::WgpuDevice::new_test(true, 1024);
+        compile_qmatmul_kernel(&device, QMATMUL_Q8_0, "qmatmul_q8_0_f32").unwrap();
+        compile_qmatmul_kernel(&device, QMATMUL_Q4_K, "qmatmul_q4_k_f32").unwrap();
+        WgpuKernel::compile_with_workgroup_size(&device, SOFTMAX, "softmax_last_dim_f32", 32)
+            .unwrap();
+        WgpuKernel::compile_extended(&device, SDPA_VECTOR, "sdpa_vector_f32", 1).unwrap();
+        compile_matmul_kernel(&device, MatMulKernel::TiledBf16).unwrap();
+        compile_elemwise_kernel(&device, UNARY_BF16, "gelu_bf16").unwrap();
+        compile_elemwise_kernel(&device, BINARY_BF16, "add_bf16").unwrap();
     }
 }

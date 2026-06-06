@@ -51,23 +51,31 @@ fn write_f16_elem(elem_idx: u32, value: f32) {
     out_words[word] = pack2x16float(pair);
 }
 
+fn f32_from_bf16_bits(bf16: u32) -> f32 {
+    return bitcast<f32>(bf16 << 16u);
+}
+
+fn bf16_bits_from_f32(value: f32) -> u32 {
+    return (bitcast<u32>(value) >> 16u) & 0xFFFFu;
+}
+
 fn read_bf16_elem(elem_idx: u32) -> f32 {
     let word = elem_idx / 2u;
-    let pair = unpack2x16float(in0_words[word]);
-    let v = select(pair.x, pair.y, (elem_idx % 2u) == 1u);
-    return f32(v);
+    let byte_off = (elem_idx % 2u) * 2u;
+    let packed = in0_words[word];
+    let bf16 = (packed >> (byte_off * 8u)) & 0xFFFFu;
+    return f32_from_bf16_bits(bf16);
 }
 
 fn write_bf16_elem(elem_idx: u32, value: f32) {
     let word = elem_idx / 2u;
-    var pair = unpack2x16float(out_words[word]);
-    let half = f32(value);
-    if (elem_idx % 2u) == 0u {
-        pair = vec2<f32>(half, pair.y);
-    } else {
-        pair = vec2<f32>(pair.x, half);
-    }
-    out_words[word] = pack2x16float(pair);
+    let byte_off = (elem_idx % 2u) * 2u;
+    let shift = byte_off * 8u;
+    let bf16 = bf16_bits_from_f32(value);
+    let mask = ~(0xFFFFu << shift);
+    var packed = out_words[word];
+    packed = (packed & mask) | (bf16 << shift);
+    out_words[word] = packed;
 }
 
 fn read_f32_elem(elem_idx: u32) -> f32 {

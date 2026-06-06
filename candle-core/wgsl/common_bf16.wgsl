@@ -1,11 +1,6 @@
-// Shared Candle wgpu kernel utilities.
-//
-// Matches Rust `TensorLayoutUniform` and `KernelUniforms` in
-// `candle-core/src/wgpu_device/bind_group.rs`.
+// Shared layout utilities and packed bf16 buffers for element-wise kernels.
 
 const MAX_DIMS: u32 = 8u;
-
-// Intel integrated GPUs (e.g. Iris) perform well with 8–32-wide workgroups.
 const WG_SIZE: u32 = 32u;
 
 struct TensorLayout {
@@ -28,18 +23,17 @@ struct KernelParams {
 }
 
 @group(0) @binding(0)
-var<storage, read_write> output_buf: array<f32>;
+var<storage, read_write> output_buf: array<u32>;
 
 @group(0) @binding(1)
-var<storage, read> input0_buf: array<f32>;
+var<storage, read> input0_buf: array<u32>;
 
 @group(0) @binding(2)
-var<storage, read> input1_buf: array<f32>;
+var<storage, read> input1_buf: array<u32>;
 
 @group(0) @binding(3)
 var<storage, read> kernel_params: KernelParams;
 
-// Convert a flat logical index into a physical buffer offset for a strided tensor.
 fn get_strided_index(idx: u32, tensor_layout: TensorLayout) -> u32 {
     var remaining = idx;
     var strided_i = 0u;
@@ -54,7 +48,6 @@ fn get_strided_index(idx: u32, tensor_layout: TensorLayout) -> u32 {
     return tensor_layout.offset + strided_i;
 }
 
-// Row-major contiguous check (same semantics as CUDA `is_contiguous`).
 fn is_contiguous(tensor_layout: TensorLayout) -> bool {
     var acc = 1u;
     let num_dims = tensor_layout.num_dims;
@@ -76,24 +69,48 @@ fn buffer_index(idx: u32, tensor_layout: TensorLayout) -> u32 {
     return get_strided_index(idx, tensor_layout);
 }
 
-fn load_in0(idx: u32) -> f32 {
-    return input0_buf[buffer_index(idx, kernel_params.in0_layout)];
+fn bf16_bits_to_f32(bits: u32) -> f32 {
+    return bitcast<f32>(bits << 16u);
 }
 
-fn load_in1(idx: u32) -> f32 {
-    return input1_buf[buffer_index(idx, kernel_params.in1_layout)];
+fn f32_to_bf16_bits(value: f32) -> u32 {
+    return (bitcast<u32>(value) >> 16u) & 0xFFFFu;
 }
 
-fn store_out(idx: u32, value: f32) {
+fn load_bf16_in0(idx: u32) -> f32 {
+    let elem = buffer_index(idx, kernel_params.in0_layout);
+    let word = elem / 2u;
+    let byte_off = (elem % 2u) * 2u;
+    let packed = input0_buf[word];
+    let bf16 = (packed >> (byte_off * 8u)) & 0xFFFFu;
+    return bf16_bits_to_f32(bf16);
+}
+
+fn load_bf16_in1(idx: u32) -> f32 {
+    let elem = buffer_index(idx, kernel_params.in1_layout);
+    let word = elem / 2u;
+    let byte_off = (elem % 2u) * 2u;
+    let packed = input1_buf[word];
+    let bf16 = (packed >> (byte_off * 8u)) & 0xFFFFu;
+    return bf16_bits_to_f32(bf16);
+}
+
+fn store_bf16_out(idx: u32, value: f32) {
     let out_layout = kernel_params.out_layout;
-    if (is_contiguous(out_layout)) {
-        output_buf[out_layout.offset + idx] = value;
-    } else {
-        output_buf[get_strided_index(idx, out_layout)] = value;
+    var elem = out_layout.offset + idx;
+    if (!is_contiguous(out_layout)) {
+        elem = get_strided_index(idx, out_layout);
     }
+    let word = elem / 2u;
+    let byte_off = (elem % 2u) * 2u;
+    let shift = byte_off * 8u;
+    let bf16 = f32_to_bf16_bits(value);
+    let mask = ~(0xFFFFu << shift);
+    var packed = output_buf[word];
+    packed = (packed & mask) | (bf16 << shift);
+    output_buf[word] = packed;
 }
 
-// Total thread count along the X grid axis (for grid-stride element loops).
 fn grid_stride_x(num_wg: vec3<u32>) -> u32 {
     return WG_SIZE * num_wg.x;
 }

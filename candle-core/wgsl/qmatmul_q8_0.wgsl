@@ -1,11 +1,11 @@
-// Q4_0 quantized matrix multiply: dst = lhs @ rhs^T (f32 activations).
+// Q8_0 quantized matrix multiply: dst = lhs @ rhs^T (f32 activations).
 //
-// Entry point: qmatmul_q4_0_f32
+// Entry point: qmatmul_q8_0_f32
 
 const QK: u32 = 32u;
 
 @compute @workgroup_size(8, 8)
-fn qmatmul_q4_0_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn qmatmul_q8_0_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
     let m = qmm_params.m;
     let n = qmm_params.n;
     let k_dim = qmm_params.k;
@@ -28,17 +28,14 @@ fn qmatmul_q4_0_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
         let q8_id = qparams.y;
 
         let block_idx = rhs_col_base + b;
-        let d4 = q4_block_d(block_idx);
+        let d8 = q8_block_d(block_idx);
         var sum_i = 0;
-        for (var j = 0u; j < QK / 2u; j = j + 1u) {
-            let qs = q4_block_qs_byte(block_idx, j);
-            let v0 = i32(qs & 0x0Fu) - 8;
-            let v1 = i32(qs >> 4u) - 8;
-            let y0 = q8_0_quant_value(qmm_lhs[lhs_base + j], q8_id);
-            let y1 = q8_0_quant_value(qmm_lhs[lhs_base + QK / 2u + j], q8_id);
-            sum_i += v0 * y0 + v1 * y1;
+        for (var j = 0u; j < QK; j = j + 1u) {
+            let w = q8_block_qs(block_idx, j);
+            let y = q8_0_quant_value(qmm_lhs[lhs_base + j], q8_id);
+            sum_i += w * y;
         }
-        acc += f32(sum_i) * d4 * q8_d;
+        acc += f32(sum_i) * d8 * q8_d;
     }
 
     qmm_out[row * n + col] = acc;

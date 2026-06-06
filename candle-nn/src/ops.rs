@@ -424,6 +424,19 @@ impl candle::CustomOp1 for SoftmaxLastDim {
             candle::MetalStorage::new(output, device.clone(), elem_count, storage.dtype());
         Ok((newstorage, layout.shape().clone()))
     }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        storage: &candle::WgpuStorage,
+        layout: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        if !(layout.is_contiguous() && layout.stride()[layout.shape().rank() - 1] == 1) {
+            candle::bail!("Non contiguous softmax-last-dim is not implemented");
+        }
+        let out = candle::wgpu_device::dispatch_softmax_last_dim_f32(storage, layout)?;
+        Ok((out, layout.shape().clone()))
+    }
 }
 
 pub fn softmax_last_dim(xs: &Tensor) -> Result<Tensor> {
@@ -1242,6 +1255,61 @@ impl candle::CustomOp3 for Sdpa {
 
         let newstorage = candle::MetalStorage::new(output, device.clone(), elem_count, q.dtype());
         Ok((newstorage, out_shape))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        q: &candle::WgpuStorage,
+        q_l: &Layout,
+        k: &candle::WgpuStorage,
+        k_l: &Layout,
+        v: &candle::WgpuStorage,
+        v_l: &Layout,
+    ) -> Result<(candle::WgpuStorage, Shape)> {
+        if q.dtype() != DType::F32 || k.dtype() != DType::F32 || v.dtype() != DType::F32 {
+            candle::bail!("wgpu sdpa_vector only supports f32 q, k, v");
+        }
+        if self.mask.is_some() || self.do_causal {
+            candle::bail!("wgpu sdpa_vector does not support mask or causal attention yet");
+        }
+
+        let q_head = q_l.dim(D::Minus1)?;
+        let q_seq = q_l.dim(2)?;
+        let k_seq = k_l.dim(2)?;
+        if q_l.dim(D::Minus1)? != k_l.dim(D::Minus1)? {
+            candle::bail!("`q` and `k` last dims must match");
+        }
+        if v_l.dim(D::Minus(3))? != k_l.dim(D::Minus(3))? {
+            candle::bail!("`k` and `v` head dims must match");
+        }
+        if q_l.dim(D::Minus(3))? % k_l.dim(D::Minus(3))? != 0 {
+            candle::bail!("query `n_heads` must be a multiple of `n_kv_heads`");
+        }
+        if q_seq > 8 {
+            candle::bail!(
+                "wgpu sdpa_vector supports q_seq <= 8 (prefill requires unfused path), got {q_seq}"
+            );
+        }
+        if q_head != 64 && q_head != 128 {
+            candle::bail!("wgpu sdpa_vector supports head_dim 64 or 128, got {q_head}");
+        }
+        if q_seq > k_seq {
+            candle::bail!("wgpu sdpa_vector requires q_seq <= k_seq");
+        }
+
+        let out = candle::wgpu_device::dispatch_sdpa_vector_f32(
+            q,
+            k,
+            v,
+            q_l,
+            k_l,
+            v_l,
+            self.scale,
+            self.softcapping,
+        )?;
+        let out_dims = vec![q_l.dim(0)?, q_l.dim(1)?, q_l.dim(2)?, v_l.dim(3)?];
+        Ok((out, Shape::from_dims(&out_dims)))
     }
 }
 

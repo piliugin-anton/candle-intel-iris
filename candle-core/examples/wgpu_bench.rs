@@ -10,8 +10,8 @@ use std::time::Instant;
 const WARMUP: u32 = 3;
 const ITERS: u32 = 20;
 const MATMUL_N: usize = 512;
-// Elem-wise kernels use one workgroup per element (max dispatch.x = 65535).
-const ADD_ELEMS: usize = 65_535;
+// Grid-stride elem-wise kernels scale beyond the old 65535 workgroup limit.
+const ADD_ELEMS: usize = 256 * 1024;
 
 fn linspace_f32(n: usize, device: &Device) -> Result<Tensor> {
     let data: Vec<f32> = (0..n).map(|i| (i as f32) * 1e-4 - 0.5).collect();

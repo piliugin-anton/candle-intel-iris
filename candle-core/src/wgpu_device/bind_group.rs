@@ -735,6 +735,24 @@ fixed_uniform!(RopeUniforms {
 
 fixed_uniform!(WhereUniforms { elem_count: u32 } pad 71);
 
+fixed_uniform!(SoftmaxUniforms {
+    n_rows: u32,
+    last_dim: u32,
+} pad 70);
+
+fixed_uniform!(SdpaUniforms {
+    bs: u32,
+    n_q_heads: u32,
+    n_kv_heads: u32,
+    q_seq: u32,
+    k_seq: u32,
+    head_dim: u32,
+    v_dim: u32,
+    gqa_factor: u32,
+    scale_bits: u32,
+    softcapping_bits: u32,
+} pad 62);
+
 #[cfg(test)]
 mod tests {
     use super::*;
