@@ -1,6 +1,7 @@
 use super::async_io::poll_device;
 use super::bind_group::{
-    BindGroupBuilder, ExtendedBindGroupBuilder, KernelUniforms, StandardBindGroupArgs,
+    BindGroupBuilder, ExtendedBindGroupArgs, ExtendedBindGroupBuilder, KernelUniforms,
+    StandardBindGroupArgs,
     StandardBindGroupLayout,
 };
 use super::shader_cache::EXTENDED_KERNEL_LAYOUT_KEY;
@@ -254,11 +255,13 @@ impl WgpuKernel {
         builder.create_bind_group(
             device.device(),
             device.queue(),
-            output,
-            input0,
-            input1,
-            input2,
-            uniform_bytes,
+            ExtendedBindGroupArgs {
+                output,
+                input0,
+                input1,
+                input2,
+                uniform_bytes,
+            },
         )
     }
 

@@ -475,7 +475,6 @@ impl BackendStorage for WgpuStorage {
             on_true_layout,
             on_false_layout,
         )
-        .map_err(Error::from)
     }
 
     fn conv1d(
@@ -617,12 +616,14 @@ impl BackendStorage for WgpuStorage {
         ops::dispatch_copy2d(
             self,
             dst,
-            d1,
-            d2,
-            src_stride1,
-            dst_stride1,
-            src_offset,
-            dst_offset,
+            ops::Copy2dParams {
+                d1,
+                d2,
+                src_stride: src_stride1,
+                dst_stride: dst_stride1,
+                src_offset,
+                dst_offset,
+            },
         )
         .map_err(Error::from)
     }

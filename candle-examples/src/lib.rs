@@ -16,7 +16,7 @@ pub fn device(cpu: bool) -> Result<Device> {
     } else if metal_is_available() {
         Ok(Device::new_metal(0)?)
     } else if wgpu_is_available() {
-        Ok(Device::new_wgpu()?)
+        Device::wgpu_if_available()
     } else {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {

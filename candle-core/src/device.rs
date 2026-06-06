@@ -380,6 +380,21 @@ impl Device {
         }
     }
 
+    pub fn wgpu_if_available() -> Result<Self> {
+        #[cfg(feature = "wgpu")]
+        {
+            if crate::utils::wgpu_is_available() {
+                Self::new_wgpu()
+            } else {
+                Ok(Self::Cpu)
+            }
+        }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            Ok(Self::Cpu)
+        }
+    }
+
     pub(crate) fn rand_uniform_f64(
         &self,
         lo: f64,

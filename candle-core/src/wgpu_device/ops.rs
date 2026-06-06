@@ -647,27 +647,32 @@ pub fn dispatch_copy_strided_src(
     Ok(())
 }
 
+/// Parameters for a 2D strided copy between wgpu buffers.
+pub struct Copy2dParams {
+    pub d1: usize,
+    pub d2: usize,
+    pub src_stride: usize,
+    pub dst_stride: usize,
+    pub src_offset: usize,
+    pub dst_offset: usize,
+}
+
 pub fn dispatch_copy2d(
     src: &WgpuStorage,
     dst: &mut WgpuStorage,
-    d1: usize,
-    d2: usize,
-    src_stride: usize,
-    dst_stride: usize,
-    src_offset: usize,
-    dst_offset: usize,
+    params: Copy2dParams,
 ) -> Result<()> {
     if src.dtype() != DType::F32 || dst.dtype() != DType::F32 {
         return Err(WgpuError::Message("wgpu copy2d only supports f32".into()));
     }
     let device = src.device();
     let uniforms = Copy2dUniforms {
-        d1: d1 as u32,
-        d2: d2 as u32,
-        src_stride: src_stride as u32,
-        dst_stride: dst_stride as u32,
-        src_offset: src_offset as u32,
-        dst_offset: dst_offset as u32,
+        d1: params.d1 as u32,
+        d2: params.d2 as u32,
+        src_stride: params.src_stride as u32,
+        dst_stride: params.dst_stride as u32,
+        src_offset: params.src_offset as u32,
+        dst_offset: params.dst_offset as u32,
         _pad: [0; 66],
     };
     let kernel = WgpuKernel::compile_with_workgroup_size(
@@ -685,7 +690,7 @@ pub fn dispatch_copy2d(
         None,
         uniforms.as_bytes(),
     )?;
-    let total = (d1 * d2) as u32;
+    let total = (params.d1 * params.d2) as u32;
     let wg = device.caps().elem_workgroup_size;
     let grid = total.div_ceil(wg);
     dst.backing()

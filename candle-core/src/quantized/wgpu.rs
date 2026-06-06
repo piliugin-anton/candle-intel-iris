@@ -217,12 +217,12 @@ pub fn load_quantized<T: GgmlType + Send + Sync + 'static>(
         std::slice::from_raw_parts(data.as_ptr().cast(), std::mem::size_of_val(data))
     };
     let buffer = upload_q4_0_weights(device, bytes)?;
-    Ok(QStorage::Wgpu(QWgpuStorage {
+    Ok(QStorage::Wgpu(Box::new(QWgpuStorage {
         dtype: T::DTYPE,
         device: device.clone(),
         buffer,
         size_in_bytes: bytes.len(),
-    }))
+    })))
 }
 
 fn dequantize_to_f32(storage: &QWgpuStorage, out: &mut [f32]) -> Result<()> {

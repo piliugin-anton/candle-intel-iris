@@ -88,7 +88,7 @@ impl Device {
             #[cfg(feature = "wgpu")]
             Device::Wgpu(d) => {
                 let storage = wgpu::QWgpuStorage::zeros(d, elem_count, dtype)?;
-                Ok(QStorage::Wgpu(storage))
+                Ok(QStorage::Wgpu(Box::new(storage)))
             }
         }
     }
@@ -99,7 +99,7 @@ pub enum QStorage {
     Metal(metal::QMetalStorage),
     Cuda(cuda::QCudaStorage),
     #[cfg(feature = "wgpu")]
-    Wgpu(wgpu::QWgpuStorage),
+    Wgpu(Box<wgpu::QWgpuStorage>),
 }
 
 impl QStorage {
@@ -962,7 +962,7 @@ impl crate::CustomOp1 for QTensor {
         layout: &crate::Layout,
     ) -> Result<(crate::WgpuStorage, Shape)> {
         let self_storage = match &self.storage {
-            QStorage::Wgpu(wgpu) => wgpu,
+            QStorage::Wgpu(wgpu) => wgpu.as_ref(),
             _ => unreachable!("Cannot call wgpu matmul on non-wgpu QTensor"),
         };
         self_storage.fwd(&self.shape, storage, layout)

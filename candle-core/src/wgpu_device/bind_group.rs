@@ -593,8 +593,25 @@ impl ExtendedBindGroupLayout {
 
 /// Builds bind groups for extended (3-input) Candle wgpu kernels.
 #[derive(Clone, Debug)]
+/// Arguments for building an extended (3-input) kernel bind group.
+pub struct ExtendedBindGroupArgs<'a> {
+    pub output: BufferOffset<'a>,
+    pub input0: BufferOffset<'a>,
+    pub input1: BufferOffset<'a>,
+    pub input2: BufferOffset<'a>,
+    pub uniform_bytes: &'a [u8],
+}
+
+#[derive(Clone)]
 pub struct ExtendedBindGroupBuilder {
     layout: ExtendedBindGroupLayout,
+}
+
+impl std::fmt::Debug for ExtendedBindGroupBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtendedBindGroupBuilder")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for ExtendedBindGroupBuilder {
@@ -618,14 +635,11 @@ impl ExtendedBindGroupBuilder {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        output: BufferOffset<'_>,
-        input0: BufferOffset<'_>,
-        input1: BufferOffset<'_>,
-        input2: BufferOffset<'_>,
-        uniform_bytes: &[u8],
+        args: ExtendedBindGroupArgs<'_>,
     ) -> Result<wgpu::BindGroup> {
         let layout = self.layout.get_or_create(device)?;
-        let uniform_buffer = BindGroupBuilder::create_uniform_buffer_bytes(device, queue, uniform_bytes);
+        let uniform_buffer =
+            BindGroupBuilder::create_uniform_buffer_bytes(device, queue, args.uniform_bytes);
 
         Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("candle extended kernel bind group"),
@@ -634,32 +648,32 @@ impl ExtendedBindGroupBuilder {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: output.buffer,
-                        offset: output.offset_in_bytes,
+                        buffer: args.output.buffer,
+                        offset: args.output.offset_in_bytes,
                         size: None,
                     }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: input0.buffer,
-                        offset: input0.offset_in_bytes,
+                        buffer: args.input0.buffer,
+                        offset: args.input0.offset_in_bytes,
                         size: None,
                     }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: input1.buffer,
-                        offset: input1.offset_in_bytes,
+                        buffer: args.input1.buffer,
+                        offset: args.input1.offset_in_bytes,
                         size: None,
                     }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: input2.buffer,
-                        offset: input2.offset_in_bytes,
+                        buffer: args.input2.buffer,
+                        offset: args.input2.offset_in_bytes,
                         size: None,
                     }),
                 },

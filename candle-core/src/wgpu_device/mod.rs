@@ -18,8 +18,9 @@ pub use crate::wgsl::{
 pub use adapter::{is_intel_adapter, WgpuDeviceConfig, INTEL_VENDOR_ID};
 pub use allocator::Allocator;
 pub use bind_group::{
-    BindGroupBuilder, ExtendedBindGroupBuilder, ExtendedBindGroupLayout, KernelUniforms,
-    StandardBindGroupArgs, StandardBindGroupLayout, TensorLayoutUniform, MAX_TENSOR_DIMS,
+    BindGroupBuilder, ExtendedBindGroupArgs, ExtendedBindGroupBuilder, ExtendedBindGroupLayout,
+    KernelUniforms, StandardBindGroupArgs, StandardBindGroupLayout, TensorLayoutUniform,
+    MAX_TENSOR_DIMS,
 };
 pub use error::{Result, WgpuError};
 pub use intel_caps::{
@@ -32,6 +33,7 @@ pub use shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
 pub use async_io::wait_for_buffer_map;
 pub use ops::{
     dispatch_copy2d, dispatch_copy_strided_src, dispatch_qmatmul_q4_0, dispatch_rms_norm_f32,
+    Copy2dParams,
     dispatch_rope_f32, dispatch_where_u8_f32, upload_q4_0_weights,
 };
 pub use storage::{buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
