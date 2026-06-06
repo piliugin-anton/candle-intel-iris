@@ -2,7 +2,7 @@
 //
 // Entry point: sdpa_vector_f32
 //
-// Constraints (enforced in Rust): q_seq <= 8, head_dim in {64, 128}, contiguous tensors.
+// Constraints (enforced in Rust): q_seq <= 8, head_dim/v_dim <= 256, contiguous tensors.
 
 struct SdpaParams {
     bs: u32,
@@ -90,7 +90,7 @@ fn sdpa_vector_f32(@builtin(workgroup_id) wg_id: vec3<u32>) {
 
     var max_score = -1e38;
     var sum_exp = 0.0;
-    var acc: array<f32, 128>;
+    var acc: array<f32, 256>;
 
     for (var d = 0u; d < v_dim; d = d + 1u) {
         acc[d] = 0.0;

@@ -12,7 +12,8 @@ use crate::backend::BackendStorage;
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::quantized::GgmlDType;
 use crate::wgsl::{
-    BINARY, BINARY_BF16, BINARY_F16, CMP, COPY, COPY_BF16, COPY_F16, COPY2D, COPY2D_BF16, COPY2D_F16,
+    BINARY, BINARY_BF16, BINARY_F16, BINARY_I32, BINARY_U32, CMP, COPY, COPY_BF16, COPY_F16,
+    COPY2D, COPY2D_BF16, COPY2D_F16,
     DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0, DEQUANT_Q8_0, MATMUL_NAIVE, MATMUL_TILED,
     MATMUL_TILED_BF16, MATMUL_TILED_F16, MATMUL_TILED_VEC, MATMUL_VEC_WIDTH,
     QMATMUL_Q4_0, QMATMUL_Q4_K, QMATMUL_Q5_0, QMATMUL_Q8_0, QUANT_Q4_0, QUANT_Q5_0, QUANT_Q8_0,
@@ -202,6 +203,31 @@ fn binary_entry_point(kernel: &str) -> Option<&'static str> {
     }
 }
 
+fn binary_entry_point_i32(kernel: &str) -> Option<&'static str> {
+    match binary_entry_point(kernel)? {
+        "add_f32" => Some("add_i32"),
+        "sub_f32" => Some("sub_i32"),
+        "mul_f32" => Some("mul_i32"),
+        "min_f32" => Some("min_i32"),
+        "max_f32" => Some("max_i32"),
+        _ => None,
+    }
+}
+
+fn binary_entry_point_u32(kernel: &str) -> Option<&'static str> {
+    match binary_entry_point(kernel)? {
+        "add_f32" => Some("add_u32"),
+        "sub_f32" => Some("sub_u32"),
+        "mul_f32" => Some("mul_u32"),
+        "min_f32" => Some("min_u32"),
+        "max_f32" => Some("max_u32"),
+        _ => None,
+    }
+}
+
+/// Maximum `head_dim` and `v_dim` supported by fused SDPA WGSL kernels.
+pub const MAX_SDPA_DIM: usize = 256;
+
 fn unary_entry_point_bf16(kernel: &str) -> Option<&'static str> {
     match unary_entry_point(kernel)? {
         "exp_f32" => Some("exp_bf16"),
@@ -385,6 +411,48 @@ fn dispatch_elemwise(args: ElemwiseDispatch<'_>) -> Result<()> {
         device.queue(),
         buffer_offset(out, out_layout),
         in0_offset.clone(),
+        in1_offset,
+        uniforms.as_bytes(),
+    )?;
+    let grid = elemwise_workgroup_count(device, out_layout.shape().elem_count());
+    backing.with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
+}
+
+struct ElemwiseIntDispatch<'a> {
+    device: &'a WgpuDevice,
+    source: &'a str,
+    entry_point: &'a str,
+    out: &'a WgpuStorage,
+    out_layout: &'a Layout,
+    in0: &'a WgpuStorage,
+    in0_layout: &'a Layout,
+    in1: Option<(&'a WgpuStorage, &'a Layout)>,
+    backing: &'a super::storage::BufferBacking,
+    uniforms: KernelUniforms,
+}
+
+fn dispatch_elemwise_int(args: ElemwiseIntDispatch<'_>) -> Result<()> {
+    let ElemwiseIntDispatch {
+        device,
+        source,
+        entry_point,
+        out,
+        out_layout,
+        in0,
+        in0_layout,
+        in1,
+        backing,
+        uniforms,
+    } = args;
+    let kernel = compile_elemwise_kernel(device, source, entry_point)?;
+    let bind_group_builder = BindGroupBuilder::new();
+    let in0_offset = buffer_offset(in0, in0_layout);
+    let in1_offset = in1.map(|(storage, layout)| buffer_offset(storage, layout));
+    let bind_group = bind_group_builder.create_bind_group_bytes(
+        device.device(),
+        device.queue(),
+        buffer_offset(out, out_layout),
+        in0_offset,
         in1_offset,
         uniforms.as_bytes(),
     )?;
@@ -853,6 +921,68 @@ pub fn dispatch_binary<B: BinaryOpT>(
         let out_f32 = dispatch_binary::<B>(&lhs_f32, &rhs_f32, &lhs_layout, &rhs_layout)?;
         let out_layout = Layout::contiguous(lhs_layout.shape());
         return out_f32.to_dtype(&out_layout, DType::F16);
+    }
+
+    if dtype == DType::I32 {
+        let entry = binary_entry_point_i32(B::KERNEL).ok_or_else(|| {
+            WgpuError::Message(format!(
+                "wgpu i32 binary kernel not available for op {}",
+                B::NAME
+            ))
+        })?;
+        let out_shape = lhs_layout.shape();
+        let out = WgpuStorage::alloc(&device, out_shape, DType::I32)?;
+        let out_layout = Layout::contiguous(out_shape);
+        dispatch_elemwise_int(ElemwiseIntDispatch {
+            device: &device,
+            source: BINARY_I32,
+            entry_point: entry,
+            out: &out,
+            out_layout: &out_layout,
+            in0: lhs,
+            in0_layout: lhs_layout,
+            in1: Some((rhs, rhs_layout)),
+            backing: lhs.backing(),
+            uniforms: KernelUniforms::new(
+                out_layout.shape().elem_count(),
+                &out_layout,
+                lhs_layout,
+                Some(rhs_layout),
+            ),
+        })
+        .map_err(Error::from)?;
+        return Ok(out);
+    }
+
+    if dtype == DType::U32 {
+        let entry = binary_entry_point_u32(B::KERNEL).ok_or_else(|| {
+            WgpuError::Message(format!(
+                "wgpu u32 binary kernel not available for op {}",
+                B::NAME
+            ))
+        })?;
+        let out_shape = lhs_layout.shape();
+        let out = WgpuStorage::alloc(&device, out_shape, DType::U32)?;
+        let out_layout = Layout::contiguous(out_shape);
+        dispatch_elemwise_int(ElemwiseIntDispatch {
+            device: &device,
+            source: BINARY_U32,
+            entry_point: entry,
+            out: &out,
+            out_layout: &out_layout,
+            in0: lhs,
+            in0_layout: lhs_layout,
+            in1: Some((rhs, rhs_layout)),
+            backing: lhs.backing(),
+            uniforms: KernelUniforms::new(
+                out_layout.shape().elem_count(),
+                &out_layout,
+                lhs_layout,
+                Some(rhs_layout),
+            ),
+        })
+        .map_err(Error::from)?;
+        return Ok(out);
     }
 
     require_f32(dtype, B::NAME)?;
@@ -1350,7 +1480,7 @@ pub fn dispatch_reduce(
         for &dim in reduce_dims {
             dst_dims[dim] = 1;
         }
-        let out_layout = Layout::contiguous(&Shape::from(dst_dims));
+        let out_layout = Layout::contiguous(Shape::from(dst_dims));
         return out.to_dtype(&out_layout, dtype);
     }
 
@@ -2145,13 +2275,15 @@ fn validate_sdpa_shapes(
     if n_q_heads % n_kv_heads != 0 {
         return Err(Error::Msg("sdpa n_heads must be a multiple of n_kv_heads".into()));
     }
-    if head_dim != 64 && head_dim != 128 {
+    if head_dim > MAX_SDPA_DIM {
         return Err(Error::Msg(format!(
-            "sdpa supports head_dim 64 or 128, got {head_dim}"
+            "sdpa supports head_dim <= {MAX_SDPA_DIM}, got {head_dim}"
         )));
     }
-    if v_dim > 128 {
-        return Err(Error::Msg(format!("sdpa supports v_dim <= 128, got {v_dim}")));
+    if v_dim > MAX_SDPA_DIM {
+        return Err(Error::Msg(format!(
+            "sdpa supports v_dim <= {MAX_SDPA_DIM}, got {v_dim}"
+        )));
     }
 
     Ok((bs, n_q_heads, n_kv_heads, q_seq, k_seq, head_dim, v_dim))
@@ -2562,6 +2694,8 @@ mod tests {
         WgpuKernel::compile_with_workgroup_size(&device, UNARY_BF16, "affine_bf16", 1).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, BINARY_BF16, "add_bf16", 1).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, BINARY_BF16, "min_bf16", 1).unwrap();
+        WgpuKernel::compile_with_workgroup_size(&device, BINARY_I32, "add_i32", 32).unwrap();
+        WgpuKernel::compile_with_workgroup_size(&device, BINARY_U32, "add_u32", 32).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, DEQUANT_Q4_0, "dequant_q4_0_f32", 256)
             .unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, DEQUANT_Q5_0, "dequant_q5_0_f32", 256)

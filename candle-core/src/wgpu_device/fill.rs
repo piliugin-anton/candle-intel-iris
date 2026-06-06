@@ -59,8 +59,8 @@ pub fn const_set_via_cpu(
     layout: &Layout,
     scalar: Scalar,
 ) -> CandleResult<()> {
-    let mut cpu = storage.to_cpu_storage().map_err(Error::from)?;
-    cpu.const_set(scalar, layout).map_err(Error::from)?;
+    let mut cpu = storage.to_cpu_storage()?;
+    cpu.const_set(scalar, layout)?;
     *storage = WgpuStorage::from_cpu(storage.device(), &cpu).map_err(Error::from)?;
     Ok(())
 }

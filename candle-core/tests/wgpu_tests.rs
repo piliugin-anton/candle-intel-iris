@@ -1504,3 +1504,111 @@ fn parity_conv2d_bf16() -> Result<()> {
     assert!(d < BF16_EPS, "bf16 conv2d max abs diff {d} >= {BF16_EPS}");
     Ok(())
 }
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sdpa_head_dim_96() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    assert_sdpa_low_precision_parity(&cpu, &gpu, 2, 4, 1, 8, 96, DType::F32, false, 0.05)
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_add_i32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let a = Tensor::new(&[-3i32, 0, 5, 7], &cpu)?;
+    let b = Tensor::new(&[1i32, 2, -1, 3], &cpu)?;
+    let out_cpu = a.add(&b)?;
+    let out_gpu = a.to_device(&gpu)?.add(&b.to_device(&gpu)?)?;
+    assert_eq!(out_cpu.to_vec1::<i32>()?, out_gpu.to_vec1::<i32>()?);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_add_u32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let a = Tensor::new(&[3u32, 0, 5, 7], &cpu)?;
+    let b = Tensor::new(&[1u32, 2, 1, 3], &cpu)?;
+    let out_cpu = a.add(&b)?;
+    let out_gpu = a.to_device(&gpu)?.add(&b.to_device(&gpu)?)?;
+    assert_eq!(out_cpu.to_vec1::<u32>()?, out_gpu.to_vec1::<u32>()?);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_index_select_f32_i32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let ids = Tensor::new(&[0i32, 2i32, 1i32], &cpu)?;
+    let t = Tensor::arange(0f32, 12f32, &cpu)?.reshape((4, 3))?;
+    let out_cpu = t.index_select(&ids, 0)?;
+    let out_gpu = t.to_device(&gpu)?.index_select(&ids.to_device(&gpu)?, 0)?;
+    assert_parity(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_gather_f16_u32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let t = Tensor::arange(0f32, 12f32, &cpu)?
+        .reshape((4, 3))?
+        .to_dtype(DType::F16)?;
+    let ids = Tensor::new(&[0u32, 2u32, 1u32, 0u32], &cpu)?.reshape((2, 2))?;
+    let out_cpu = t.gather(&ids, 0)?;
+    let out_gpu = t.to_device(&gpu)?.gather(&ids.to_device(&gpu)?, 0)?;
+    assert_parity_f16(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_dequant_q5_0_f32() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let wgpu_dev = match &gpu {
+        Device::Wgpu(d) => d.clone(),
+        _ => unreachable!(),
+    };
+
+    let k = 64usize;
+    let src = Tensor::rand(-2.0f32, 2.0f32, (k,), &cpu)?;
+    let qtensor = QTensor::quantize_onto(&src, GgmlDType::Q5_0, &cpu)?;
+    let dequant_cpu = qtensor.dequantize(&cpu)?;
+
+    let bytes = qtensor.data()?;
+    let quant_buf = upload_quant_weights(&wgpu_dev, &bytes)?;
+    let out_gpu = dispatch_dequant_f32(&wgpu_dev, GgmlDType::Q5_0, &quant_buf, k)?;
+    let out_gpu_t = Tensor::from_vec(
+        match out_gpu.to_cpu_storage()? {
+            candle_core::CpuStorage::F32(v) => v,
+            _ => unreachable!(),
+        },
+        (k,),
+        &cpu,
+    )?;
+    assert_parity(&dequant_cpu, &out_gpu_t)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_quant_dequant_q5_0_roundtrip() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+
+    let k = 64usize;
+    let src = Tensor::rand(-2.0f32, 2.0f32, (k,), &cpu)?;
+    let src_gpu = src.to_device(&gpu)?;
+    let qtensor = QTensor::quantize(&src_gpu, GgmlDType::Q5_0)?;
+    let roundtrip = qtensor.dequantize(&gpu)?;
+    let d = max_abs_diff(&src, &roundtrip.to_device(&cpu)?)?;
+    assert!(d < 1.0, "q5_0 gpu quant/dequant max abs diff {d} >= 1.0");
+    Ok(())
+}

@@ -1,5 +1,4 @@
 use super::bind_group::{ArgSortUniforms, BindGroupBuilder};
-use super::error::WgpuError;
 use super::kernel::WgpuKernel;
 use super::storage::{buffer_offset, WgpuStorage};
 use crate::wgsl::{ARGSORT, ARGSORT_BF16, ARGSORT_F16, ARGSORT_U32};
@@ -76,7 +75,7 @@ pub fn dispatch_arg_sort_last_dim(
     let elem_count = layout.shape().elem_count();
     let nrows = elem_count / last_dim;
     let device = storage.device();
-    let out = WgpuStorage::alloc(device, layout.shape(), DType::U32).map_err(WgpuError::from)?;
+    let out = WgpuStorage::alloc(device, layout.shape(), DType::U32)?;
     let out_layout = Layout::contiguous(layout.shape());
     let uniforms = ArgSortUniforms {
         ncols: last_dim as u32,
@@ -87,8 +86,7 @@ pub fn dispatch_arg_sort_last_dim(
     let (shader, entry) = argsort_entry(dtype, asc)
         .ok_or_else(|| Error::UnsupportedDTypeForOp(dtype, "argsort").bt())?;
     let kernel =
-        WgpuKernel::compile_with_workgroup_size(device, shader, entry, ARGSORT_WG_SIZE)
-            .map_err(WgpuError::from)?;
+        WgpuKernel::compile_with_workgroup_size(device, shader, entry, ARGSORT_WG_SIZE)?;
     let in0 = buffer_offset(storage, layout);
     let bind_group = BindGroupBuilder::new()
         .create_bind_group_bytes(
@@ -98,11 +96,9 @@ pub fn dispatch_arg_sort_last_dim(
             in0.clone(),
             Some(in0),
             uniforms.as_bytes(),
-        )
-        .map_err(WgpuError::from)?;
+        )?;
     storage
         .backing()
-        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [nrows as u32, 1, 1]))
-        .map_err(WgpuError::from)?;
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [nrows as u32, 1, 1]))?;
     Ok(out)
 }

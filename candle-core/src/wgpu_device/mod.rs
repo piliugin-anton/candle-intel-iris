@@ -1,3 +1,6 @@
+// GPU dispatch helpers pass tensor buffers, layouts, and uniforms (CUDA-parity arity).
+#![allow(clippy::too_many_arguments)]
+
 mod adapter;
 mod allocator;
 mod async_io;
@@ -53,7 +56,7 @@ pub use ops::{
     dispatch_sdpa_vector_f32, dispatch_softmax_last_dim, dispatch_softmax_last_dim_f32,
     gpu_dequant_supported,
     gpu_quant_supported, Copy2dParams, dispatch_where_u8_f32, upload_q4_0_weights,
-    upload_quant_weights,
+    upload_quant_weights, MAX_SDPA_DIM,
 };
 pub use sort::{
     dispatch_arg_sort_last_dim, gpu_argsort_supported, MAX_ARGSORT_NCOLS_PAD,

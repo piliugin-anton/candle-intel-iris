@@ -26,20 +26,45 @@ fn indexing_entry(ids_dtype: DType, op: &str) -> Option<&'static str> {
     match (ids_dtype, op) {
         (DType::U32, "index_select") => Some("index_select_f32_u32"),
         (DType::U8, "index_select") => Some("index_select_f32_u8"),
+        (DType::I32, "index_select") => Some("index_select_f32_i32"),
         (DType::U32, "gather") => Some("gather_f32_u32"),
         (DType::U8, "gather") => Some("gather_f32_u8"),
+        (DType::I32, "gather") => Some("gather_f32_i32"),
         (DType::U32, "scatter") => Some("scatter_f32_u32"),
         (DType::U8, "scatter") => Some("scatter_f32_u8"),
+        (DType::I32, "scatter") => Some("scatter_f32_i32"),
         (DType::U32, "scatter_add") => Some("scatter_add_f32_u32"),
         (DType::U8, "scatter_add") => Some("scatter_add_f32_u8"),
+        (DType::I32, "scatter_add") => Some("scatter_add_f32_i32"),
         (DType::U32, "index_add") => Some("index_add_f32_u32"),
         (DType::U8, "index_add") => Some("index_add_f32_u8"),
+        (DType::I32, "index_add") => Some("index_add_f32_i32"),
         _ => None,
     }
 }
 
+fn gpu_indexing_data_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::F32 | DType::F16 | DType::BF16)
+}
+
 fn gpu_indexing_supported(data_dtype: DType, ids_dtype: DType) -> bool {
-    data_dtype == DType::F32 && indexing_entry(ids_dtype, "gather").is_some()
+    gpu_indexing_data_dtype(data_dtype) && indexing_entry(ids_dtype, "gather").is_some()
+}
+
+/// Cast low-precision activations to f32 for the indexing kernels; returns `(storage, layout, restore_dtype)`.
+fn indexing_data_as_f32(
+    storage: &WgpuStorage,
+    layout: &Layout,
+) -> CandleResult<(WgpuStorage, Layout, Option<DType>)> {
+    match storage.dtype() {
+        DType::F32 => Ok((storage.clone(), layout.clone(), None)),
+        DType::F16 | DType::BF16 => {
+            let f32 = storage.to_dtype(layout, DType::F32)?;
+            let f32_layout = Layout::contiguous(layout.shape());
+            Ok((f32, f32_layout, Some(storage.dtype())))
+        }
+        other => Err(Error::UnsupportedDTypeForOp(other, "indexing").bt()),
+    }
 }
 
 fn compile_indexing_kernel(device: &super::WgpuDevice, entry: &str) -> Result<WgpuKernel> {
@@ -83,11 +108,10 @@ pub fn gather_via_cpu(
     ids_l: &Layout,
     dim: usize,
 ) -> CandleResult<WgpuStorage> {
-    let src_cpu = src.to_cpu_storage().map_err(Error::from)?;
-    let ids_cpu = ids.to_cpu_storage().map_err(Error::from)?;
+    let src_cpu = src.to_cpu_storage()?;
+    let ids_cpu = ids.to_cpu_storage()?;
     let out_cpu = src_cpu
-        .gather(src_l, &ids_cpu, ids_l, dim)
-        .map_err(Error::from)?;
+        .gather(src_l, &ids_cpu, ids_l, dim)?;
     WgpuStorage::from_cpu(src.device(), &out_cpu).map_err(Error::from)
 }
 
@@ -98,11 +122,10 @@ pub fn index_select_via_cpu(
     ids_l: &Layout,
     dim: usize,
 ) -> CandleResult<WgpuStorage> {
-    let src_cpu = src.to_cpu_storage().map_err(Error::from)?;
-    let ids_cpu = ids.to_cpu_storage().map_err(Error::from)?;
+    let src_cpu = src.to_cpu_storage()?;
+    let ids_cpu = ids.to_cpu_storage()?;
     let out_cpu = src_cpu
-        .index_select(&ids_cpu, src_l, ids_l, dim)
-        .map_err(Error::from)?;
+        .index_select(&ids_cpu, src_l, ids_l, dim)?;
     WgpuStorage::from_cpu(src.device(), &out_cpu).map_err(Error::from)
 }
 
@@ -115,12 +138,11 @@ pub fn index_add_via_cpu(
     src_l: &Layout,
     dim: usize,
 ) -> CandleResult<WgpuStorage> {
-    let dst_cpu = dst.to_cpu_storage().map_err(Error::from)?;
-    let ids_cpu = ids.to_cpu_storage().map_err(Error::from)?;
-    let src_cpu = src.to_cpu_storage().map_err(Error::from)?;
+    let dst_cpu = dst.to_cpu_storage()?;
+    let ids_cpu = ids.to_cpu_storage()?;
+    let src_cpu = src.to_cpu_storage()?;
     let out_cpu = dst_cpu
-        .index_add(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)
-        .map_err(Error::from)?;
+        .index_add(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
     WgpuStorage::from_cpu(dst.device(), &out_cpu).map_err(Error::from)
 }
 
@@ -134,17 +156,15 @@ pub fn scatter_via_cpu(
     dim: usize,
     add: bool,
 ) -> CandleResult<()> {
-    let mut dst_cpu = dst.to_cpu_storage().map_err(Error::from)?;
-    let ids_cpu = ids.to_cpu_storage().map_err(Error::from)?;
-    let src_cpu = src.to_cpu_storage().map_err(Error::from)?;
+    let mut dst_cpu = dst.to_cpu_storage()?;
+    let ids_cpu = ids.to_cpu_storage()?;
+    let src_cpu = src.to_cpu_storage()?;
     if add {
         dst_cpu
-            .scatter_add_set(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)
-            .map_err(Error::from)?;
+            .scatter_add_set(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
     } else {
         dst_cpu
-            .scatter_set(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)
-            .map_err(Error::from)?;
+            .scatter_set(dst_l, &ids_cpu, ids_l, &src_cpu, src_l, dim)?;
     }
     *dst = WgpuStorage::from_cpu(dst.device(), &dst_cpu).map_err(Error::from)?;
     Ok(())
@@ -160,11 +180,12 @@ pub fn dispatch_gather_f32(
     if !gpu_indexing_supported(src.dtype(), ids.dtype()) {
         return gather_via_cpu(src, src_l, ids, ids_l, dim);
     }
-    require_contiguous(src_l, "gather")?;
+    let (src_f32, src_f32_l, restore_dtype) = indexing_data_as_f32(src, src_l)?;
+    require_contiguous(&src_f32_l, "gather")?;
     require_contiguous(ids_l, "gather")?;
     let entry = indexing_entry(ids.dtype(), "gather")
         .ok_or_else(|| WgpuError::Message(format!("wgpu gather unsupported ids {:?}", ids.dtype())))?;
-    let (left, src_dim, src_right) = split_dim(src_l.dims(), dim);
+    let (left, src_dim, src_right) = split_dim(src_f32_l.dims(), dim);
     let ids_dim = ids_l.dims()[dim];
     let ids_right: usize = ids_l.dims()[dim + 1..].iter().product();
     let elem_count = ids_l.shape().elem_count();
@@ -187,12 +208,15 @@ pub fn dispatch_gather_f32(
         uniforms,
         &out,
         &out_layout,
-        src,
-        src_l,
+        &src_f32,
+        &src_f32_l,
         ids,
         ids_l,
     )
     .map_err(Error::from)?;
+    if let Some(dtype) = restore_dtype {
+        return out.to_dtype(&out_layout, dtype);
+    }
     Ok(out)
 }
 
@@ -206,7 +230,8 @@ pub fn dispatch_index_select_f32(
     if !gpu_indexing_supported(src.dtype(), ids.dtype()) {
         return index_select_via_cpu(src, src_l, ids, ids_l, dim);
     }
-    require_contiguous(src_l, "index-select")?;
+    let (src_f32, src_f32_l, restore_dtype) = indexing_data_as_f32(src, src_l)?;
+    require_contiguous(&src_f32_l, "index-select")?;
     require_contiguous(ids_l, "index-select")?;
     let entry = indexing_entry(ids.dtype(), "index_select").ok_or_else(|| {
         WgpuError::Message(format!(
@@ -214,10 +239,10 @@ pub fn dispatch_index_select_f32(
             ids.dtype()
         ))
     })?;
-    let (left, src_dim, right) = split_dim(src_l.dims(), dim);
+    let (left, src_dim, right) = split_dim(src_f32_l.dims(), dim);
     let ids_dim_size = ids_l.shape().elem_count();
     let elem_count = ids_dim_size * left * right;
-    let mut out_dims = src_l.dims().to_vec();
+    let mut out_dims = src_f32_l.dims().to_vec();
     out_dims[dim] = ids_l.dims()[0];
     let out_shape = Shape::from_dims(&out_dims);
     let out = WgpuStorage::alloc(src.device(), &out_shape, DType::F32).map_err(Error::from)?;
@@ -238,12 +263,15 @@ pub fn dispatch_index_select_f32(
         uniforms,
         &out,
         &out_layout,
-        src,
-        src_l,
+        &src_f32,
+        &src_f32_l,
         ids,
         ids_l,
     )
     .map_err(Error::from)?;
+    if let Some(dtype) = restore_dtype {
+        return out.to_dtype(&out_layout, dtype);
+    }
     Ok(out)
 }
 
@@ -260,37 +288,53 @@ pub fn dispatch_scatter_f32(
     if !gpu_indexing_supported(dst.dtype(), ids.dtype()) {
         return scatter_via_cpu(dst, dst_l, ids, ids_l, src, src_l, dim, add);
     }
-    require_contiguous(dst_l, "scatter")?;
+    let (src_f32, src_f32_l, _) = indexing_data_as_f32(src, src_l)?;
     require_contiguous(ids_l, "scatter")?;
-    require_contiguous(src_l, "scatter")?;
+    require_contiguous(&src_f32_l, "scatter")?;
     let op = if add { "scatter_add" } else { "scatter" };
     let entry = indexing_entry(ids.dtype(), op)
         .ok_or_else(|| WgpuError::Message(format!("wgpu {op} unsupported ids {:?}", ids.dtype())))?;
-    let (left, src_dim, right) = split_dim(src_l.dims(), dim);
-    let dst_dim = dst_l.dims()[dim];
-    let elem_count = left * right;
-    let uniforms = IndexingUniforms {
-        elem_count: elem_count as u32,
-        left_size: left as u32,
-        src_dim_size: src_dim as u32,
-        dim_size: dst_dim as u32,
-        right_size: right as u32,
-        ids_dim_size: 0,
-        _pad: [0; 66],
+    let (left, src_dim, right) = split_dim(src_f32_l.dims(), dim);
+    let device = dst.device().clone();
+
+    let run = |dst_buf: &mut WgpuStorage, dst_buf_l: &Layout| -> CandleResult<()> {
+        let dst_dim = dst_buf_l.dims()[dim];
+        let elem_count = left * right;
+        let uniforms = IndexingUniforms {
+            elem_count: elem_count as u32,
+            left_size: left as u32,
+            src_dim_size: src_dim as u32,
+            dim_size: dst_dim as u32,
+            right_size: right as u32,
+            ids_dim_size: 0,
+            _pad: [0; 66],
+        };
+        dispatch_indexing(
+            &device,
+            entry,
+            elem_count,
+            uniforms,
+            dst_buf,
+            dst_buf_l,
+            &src_f32,
+            &src_f32_l,
+            ids,
+            ids_l,
+        )
+        .map_err(Error::from)
     };
-    dispatch_indexing(
-        dst.device(),
-        entry,
-        elem_count,
-        uniforms,
-        dst,
-        dst_l,
-        src,
-        src_l,
-        ids,
-        ids_l,
-    )
-    .map_err(Error::from)?;
+
+    if matches!(dst.dtype(), DType::F16 | DType::BF16) {
+        let dtype = dst.dtype();
+        let mut dst_f32 = dst.to_dtype(dst_l, DType::F32)?;
+        let dst_f32_l = Layout::contiguous(dst_l.shape());
+        require_contiguous(&dst_f32_l, "scatter")?;
+        run(&mut dst_f32, &dst_f32_l)?;
+        *dst = dst_f32.to_dtype(&dst_f32_l, dtype)?;
+    } else {
+        require_contiguous(dst_l, "scatter")?;
+        run(dst, dst_l)?;
+    }
     Ok(())
 }
 
@@ -306,18 +350,21 @@ pub fn dispatch_index_add_f32(
     if !gpu_indexing_supported(dst.dtype(), ids.dtype()) {
         return index_add_via_cpu(dst, dst_l, ids, ids_l, src, src_l, dim);
     }
+    let (dst_f32, dst_f32_l, dst_restore) = indexing_data_as_f32(dst, dst_l)?;
+    let (src_f32, src_f32_l, _) = indexing_data_as_f32(src, src_l)?;
     require_contiguous(ids_l, "index-add")?;
-    require_contiguous(src_l, "index-add")?;
+    require_contiguous(&src_f32_l, "index-add")?;
     let entry = indexing_entry(ids.dtype(), "index_add").ok_or_else(|| {
         WgpuError::Message(format!("wgpu index_add unsupported ids {:?}", ids.dtype()))
     })?;
-    let mut acc = WgpuStorage::alloc(dst.device(), dst_l.shape(), DType::F32).map_err(Error::from)?;
-    dispatch_copy_strided_src(dst, &mut acc, 0, dst_l).map_err(Error::from)?;
-    let (left, src_dim, right) = split_dim(src_l.dims(), dim);
-    let dst_dim = dst_l.dims()[dim];
+    let mut acc =
+        WgpuStorage::alloc(dst.device(), dst_f32_l.shape(), DType::F32).map_err(Error::from)?;
+    dispatch_copy_strided_src(&dst_f32, &mut acc, 0, &dst_f32_l).map_err(Error::from)?;
+    let (left, src_dim, right) = split_dim(src_f32_l.dims(), dim);
+    let dst_dim = dst_f32_l.dims()[dim];
     let ids_dim_size = ids_l.dims()[0];
     let elem_count = left * right;
-    let acc_layout = Layout::contiguous(dst_l.shape());
+    let acc_layout = Layout::contiguous(dst_f32_l.shape());
     let uniforms = IndexingUniforms {
         elem_count: elem_count as u32,
         left_size: left as u32,
@@ -334,12 +381,15 @@ pub fn dispatch_index_add_f32(
         uniforms,
         &acc,
         &acc_layout,
-        src,
-        src_l,
+        &src_f32,
+        &src_f32_l,
         ids,
         ids_l,
     )
     .map_err(Error::from)?;
+    if let Some(dtype) = dst_restore {
+        return acc.to_dtype(&acc_layout, dtype);
+    }
     Ok(acc)
 }
 
@@ -351,6 +401,7 @@ mod tests {
     #[test]
     fn indexing_shader_entry_points() {
         assert!(INDEXING.contains("fn index_select_f32_u32"));
+        assert!(INDEXING.contains("fn index_select_f32_i32"));
         assert!(INDEXING.contains("fn gather_f32_u8"));
         assert!(INDEXING.contains("fn scatter_add_f32_u32"));
     }
@@ -359,6 +410,7 @@ mod tests {
     fn indexing_kernel_compiles_on_noop_device() {
         let device = WgpuDevice::new_test(false, 4096);
         compile_indexing_kernel(&device, "gather_f32_u32").expect("gather kernel compiles");
+        compile_indexing_kernel(&device, "gather_f32_i32").expect("gather i32 kernel compiles");
     }
 
     #[test]

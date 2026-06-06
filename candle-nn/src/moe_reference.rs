@@ -60,6 +60,8 @@ pub fn moe_gemm_reference(
 }
 
 /// Reference quantized MoE GEMM: dequantize expert weights then run the dense reference path.
+// Mirrors `moe_gemm_gguf` CUDA/wgpu entry points (same 8-arg surface).
+#[allow(clippy::too_many_arguments)]
 pub fn moe_gemm_gguf_reference(
     input: &Tensor,
     weights: &QTensor,

@@ -21,6 +21,14 @@ pub const BINARY: &str = concat!(
     include_str!("../wgsl/common.wgsl"),
     include_str!("../wgsl/binary.wgsl")
 );
+pub const BINARY_I32: &str = concat!(
+    include_str!("../wgsl/common_i32.wgsl"),
+    include_str!("../wgsl/binary_i32.wgsl")
+);
+pub const BINARY_U32: &str = concat!(
+    include_str!("../wgsl/common_u32.wgsl"),
+    include_str!("../wgsl/binary_u32.wgsl")
+);
 pub const COPY: &str = concat!(
     include_str!("../wgsl/common.wgsl"),
     include_str!("../wgsl/copy.wgsl")

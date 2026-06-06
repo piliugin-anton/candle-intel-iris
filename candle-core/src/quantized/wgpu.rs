@@ -58,8 +58,7 @@ impl QWgpuStorage {
                 self.dtype,
                 &self.buffer,
                 elem_count,
-            )
-            .map_err(Into::into);
+            );
         }
         let mut out = vec![0f32; elem_count];
         dequantize_to_f32(self, &mut out)?;
@@ -69,7 +68,7 @@ impl QWgpuStorage {
     pub fn quantize(&mut self, src: &WgpuStorage) -> Result<()> {
         if gpu_quant_supported(self.dtype) {
             let elem_count = src.elem_count();
-            let layout = Layout::contiguous(&Shape::from(elem_count));
+            let layout = Layout::contiguous(Shape::from(elem_count));
             let buffer = dispatch_quant_f32(&self.device, self.dtype, src, &layout)?;
             self.size_in_bytes = elem_count / self.dtype.block_size() * self.dtype.type_size();
             self.buffer = buffer;

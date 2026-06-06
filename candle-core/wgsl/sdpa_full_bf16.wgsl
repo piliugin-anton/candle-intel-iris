@@ -134,7 +134,7 @@ fn sdpa_full_bf16(@builtin(workgroup_id) wg_id: vec3<u32>) {
 
     var max_score = -1e38;
     var sum_exp = 0.0;
-    var acc: array<f32, 128>;
+    var acc: array<f32, 256>;
 
     for (var d = 0u; d < v_dim; d = d + 1u) {
         acc[d] = 0.0;

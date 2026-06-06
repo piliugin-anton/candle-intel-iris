@@ -28,7 +28,7 @@ pub fn uses_sdpa_device(device: &Device) -> bool {
 pub fn fused_attention_available(device: &Device, head_dim: usize) -> bool {
     #[cfg(feature = "wgpu")]
     if device.is_wgpu() {
-        return head_dim == 64 || head_dim == 128;
+        return head_dim <= candle::wgpu_device::MAX_SDPA_DIM;
     }
     #[cfg(feature = "metal")]
     if device.is_metal() {

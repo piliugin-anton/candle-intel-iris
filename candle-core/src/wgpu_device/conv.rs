@@ -161,7 +161,7 @@ fn dispatch_im2col2d(
         * h_k
         * w_k;
     let col = WgpuStorage::alloc(device, &Shape::from(dst_numel), dtype)?;
-    let col_layout = Layout::contiguous(&Shape::from(dst_numel));
+    let col_layout = Layout::contiguous(Shape::from(dst_numel));
     let uniforms = Im2col2dUniforms {
         dst_numel: dst_numel as u32,
         h_out: h_out as u32,
@@ -205,7 +205,7 @@ fn dispatch_im2col1d(
     let c_in = src_layout.shape().dims()[1];
     let dst_numel = b * l_out * c_in * l_k;
     let col = WgpuStorage::alloc(device, &Shape::from(dst_numel), dtype)?;
-    let col_layout = Layout::contiguous(&Shape::from(dst_numel));
+    let col_layout = Layout::contiguous(Shape::from(dst_numel));
     let uniforms = Im2col1dUniforms {
         dst_numel: dst_numel as u32,
         l_out: l_out as u32,
@@ -303,8 +303,7 @@ pub fn conv2d(
         .transpose(1, 2)?
         .transpose(1, 3)?;
     let mut res_t = WgpuStorage::alloc(device, res_l.shape(), compute_dtype)?;
-    res.copy_strided_src(&mut res_t, 0, &res_l)
-        .map_err(Error::from)?;
+    res.copy_strided_src(&mut res_t, 0, &res_l)?;
     Ok(res_t)
 }
 
@@ -373,8 +372,7 @@ pub fn conv1d(
 
     let res_l = Layout::contiguous((b, l_out, n)).transpose(1, 2)?;
     let mut res_t = WgpuStorage::alloc(device, res_l.shape(), compute_dtype)?;
-    res.copy_strided_src(&mut res_t, 0, &res_l)
-        .map_err(Error::from)?;
+    res.copy_strided_src(&mut res_t, 0, &res_l)?;
     Ok(res_t)
 }
 
@@ -558,7 +556,7 @@ fn dispatch_pool2d(
 fn pool_out_shape(layout: &Layout, kernel_size: (usize, usize), stride: (usize, usize)) -> CandleResult<Shape> {
     let (k_h, k_w) = kernel_size;
     let (s_h, s_w) = stride;
-    let (b, c, h, w) = layout.shape().dims4().map_err(Error::from)?;
+    let (b, c, h, w) = layout.shape().dims4()?;
     let h_out = (h - k_h) / s_h + 1;
     let w_out = (w - k_w) / s_w + 1;
     Ok(Shape::from((b, c, h_out, w_out)))
@@ -595,10 +593,10 @@ pub fn upsample_nearest1d(
     layout: &Layout,
     dst_sz: usize,
 ) -> CandleResult<WgpuStorage> {
-    let (b, c, _) = layout.shape().dims3().map_err(Error::from)?;
+    let (b, c, _) = layout.shape().dims3()?;
     let out_shape = Shape::from((b, c, dst_sz));
     with_compute_dtype(storage, layout, &out_shape, "upsample_nearest1d", |storage, layout, compute_dtype| {
-        let (b, c, src_sz) = layout.shape().dims3().map_err(Error::from)?;
+        let (b, c, src_sz) = layout.shape().dims3()?;
         let dst_numel = b * c * dst_sz;
         let out_shape = Shape::from((b, c, dst_sz));
         let device = storage.device();
@@ -639,10 +637,10 @@ pub fn upsample_nearest2d(
     dst_h: usize,
     dst_w: usize,
 ) -> CandleResult<WgpuStorage> {
-    let (b, c, _, _) = layout.shape().dims4().map_err(Error::from)?;
+    let (b, c, _, _) = layout.shape().dims4()?;
     let out_shape = Shape::from((b, c, dst_h, dst_w));
     with_compute_dtype(storage, layout, &out_shape, "upsample_nearest2d", |storage, layout, compute_dtype| {
-        let (b, c, src_h, src_w) = layout.shape().dims4().map_err(Error::from)?;
+        let (b, c, src_h, src_w) = layout.shape().dims4()?;
         let dst_numel = b * c * dst_h * dst_w;
         let out_shape = Shape::from((b, c, dst_h, dst_w));
         let device = storage.device();
@@ -687,10 +685,10 @@ pub fn upsample_bilinear2d(
     scale_h: Option<f64>,
     scale_w: Option<f64>,
 ) -> CandleResult<WgpuStorage> {
-    let (b, c, _, _) = layout.shape().dims4().map_err(Error::from)?;
+    let (b, c, _, _) = layout.shape().dims4()?;
     let out_shape = Shape::from((b, c, dst_h, dst_w));
     with_compute_dtype(storage, layout, &out_shape, "upsample_bilinear2d", |storage, layout, compute_dtype| {
-        let (b, c, _, _) = layout.shape().dims4().map_err(Error::from)?;
+        let (b, c, _, _) = layout.shape().dims4()?;
         let dst_numel = b * c * dst_h * dst_w;
         let out_shape = Shape::from((b, c, dst_h, dst_w));
         let device = storage.device();
