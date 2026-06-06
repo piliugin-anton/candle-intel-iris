@@ -1171,3 +1171,71 @@ fn parity_rand_f32() -> Result<()> {
     );
     Ok(())
 }
+
+fn assert_parity_f16(cpu: &Tensor, gpu: &Tensor) -> Result<()> {
+    let cpu_f32 = cpu.to_dtype(DType::F32)?;
+    let gpu_f32 = gpu.to_dtype(DType::F32)?;
+    let d = max_abs_diff(&cpu_f32, &gpu_f32)?;
+    assert!(d < F16_EPS, "f16 parity max abs diff {d} >= {F16_EPS}");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_conv2d_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let t = Tensor::rand(-1.0f32, 1.0f32, (1, 3, 8, 8), &cpu)?.to_dtype(DType::F16)?;
+    let w = Tensor::rand(-1.0f32, 1.0f32, (4, 3, 3, 3), &cpu)?.to_dtype(DType::F16)?;
+    let out_cpu = t.conv2d(&w, 1, 1, 1, 1)?;
+    let out_gpu = t
+        .to_device(&gpu)?
+        .conv2d(&w.to_device(&gpu)?, 1, 1, 1, 1)?;
+    assert_parity_f16(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_reduce_sum_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let t = Tensor::rand(-1.0f32, 1.0f32, (2, 4, 6), &cpu)?.to_dtype(DType::F16)?;
+    let out_cpu = t.sum(1)?;
+    let out_gpu = t.to_device(&gpu)?.sum(1)?;
+    assert_parity_f16(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_avg_pool2d_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let t = Tensor::rand(-1.0f32, 1.0f32, (1, 2, 8, 8), &cpu)?.to_dtype(DType::F16)?;
+    let out_cpu = t.avg_pool2d(2)?;
+    let out_gpu = t.to_device(&gpu)?.avg_pool2d(2)?;
+    assert_parity_f16(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_conv2d_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    if !gpu.supports_bf16() {
+        return Ok(());
+    }
+    let cpu = Device::Cpu;
+    let t = Tensor::rand(-1.0f32, 1.0f32, (1, 3, 8, 8), &cpu)?.to_dtype(DType::BF16)?;
+    let w = Tensor::rand(-1.0f32, 1.0f32, (4, 3, 3, 3), &cpu)?.to_dtype(DType::BF16)?;
+    let out_cpu = t
+        .to_dtype(DType::F32)?
+        .conv2d(&w.to_dtype(DType::F32)?, 1, 1, 1, 1)?;
+    let out_gpu = t
+        .to_device(&gpu)?
+        .conv2d(&w.to_device(&gpu)?, 1, 1, 1, 1)?;
+    let d = max_abs_diff(&out_cpu.to_dtype(DType::F32)?, &out_gpu.to_dtype(DType::F32)?)?;
+    assert!(d < BF16_EPS, "bf16 conv2d max abs diff {d} >= {BF16_EPS}");
+    Ok(())
+}

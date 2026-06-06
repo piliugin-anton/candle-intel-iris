@@ -271,7 +271,7 @@ fn powf_bf16(@builtin(workgroup_id) wg_id: vec3<u32>) {
                 }
             }
         }
-        store_bf16_out(i, bf16(y));
+        store_bf16_out(i, y);
     }
 }
 
@@ -284,6 +284,6 @@ fn elu_bf16(@builtin(workgroup_id) wg_id: vec3<u32>) {
     for (var i = 0u; i < kernel_params.elem_count; i = i + 1u) {
         let x = f32(load_bf16_in0(i));
         let y = select(alpha * (exp(x) - 1.0), x, x > 0.0);
-        store_bf16_out(i, bf16(y));
+        store_bf16_out(i, y);
     }
 }

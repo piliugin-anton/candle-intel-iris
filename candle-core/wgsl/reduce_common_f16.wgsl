@@ -1,3 +1,4 @@
+enable f16;
 // Reduction kernel shared definitions.
 //
 // Matches the standard bind group layout (bindings 0–3) but uses reduction-specific
@@ -26,13 +27,13 @@ struct ReduceParams {
 }
 
 @group(0) @binding(0)
-var<storage, read_write> reduce_out_f32: array<f32>;
+var<storage, read_write> reduce_out: array<f16>;
 
 @group(0) @binding(1)
-var<storage, read> reduce_in: array<f32>;
+var<storage, read> reduce_in: array<f16>;
 
 @group(0) @binding(2)
-var<storage, read> reduce_in_pad: array<f32>;
+var<storage, read> reduce_in_pad: array<f16>;
 
 @group(0) @binding(3)
 var<storage, read> reduce_params: ReduceParams;
@@ -59,13 +60,13 @@ fn reduce_src_index(dst_id: u32, chunk_offset: u32) -> u32 {
     return src_idx;
 }
 
-fn reduce_load_src(dst_id: u32, chunk_offset: u32) -> f32 {
+fn reduce_load_src(dst_id: u32, chunk_offset: u32) -> f16 {
     return reduce_in[reduce_src_index(dst_id, chunk_offset)];
 }
 
 // Tree reduction in workgroup shared memory.
-var<workgroup> wg_sum: array<f32, REDUCE_WG_SIZE>;
-var<workgroup> wg_max_val: array<f32, REDUCE_WG_SIZE>;
+var<workgroup> wg_sum: array<f16, REDUCE_WG_SIZE>;
+var<workgroup> wg_max_val: array<f16, REDUCE_WG_SIZE>;
 var<workgroup> wg_max_idx: array<u32, REDUCE_WG_SIZE>;
 
 fn workgroup_reduce_sum(local_id: u32) {

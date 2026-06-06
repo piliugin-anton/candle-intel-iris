@@ -1,0 +1,104 @@
+fn bf16_bits_to_f32(bits: u32) -> f32 {
+    return bitcast<f32>(bits << 16u);
+}
+
+fn f32_to_bf16_bits(value: f32) -> u32 {
+    return (bitcast<u32>(value) >> 16u) & 0xFFFFu;
+}
+
+fn read_packed_bf16(packed: u32, elem_idx: u32) -> f32 {
+    let byte_off = (elem_idx % 2u) * 2u;
+    let bf16 = (packed >> (byte_off * 8u)) & 0xFFFFu;
+    return bf16_bits_to_f32(bf16);
+}
+
+fn pack_bf16_value(packed: u32, elem_idx: u32, value: f32) -> u32 {
+    let byte_off = (elem_idx % 2u) * 2u;
+    let shift = byte_off * 8u;
+    let bf16 = f32_to_bf16_bits(value);
+    let mask = ~(0xFFFFu << shift);
+    return (packed & mask) | (bf16 << shift);
+}
+const MAX_DIMS: u32 = 8u;
+
+struct TensorLayout {
+    dims: array<u32, MAX_DIMS>,
+    strides: array<u32, MAX_DIMS>,
+    offset: u32,
+    num_dims: u32,
+    _pad: vec2<u32>,
+}
+
+struct ConvTranspose1dParams {
+    l_out: u32,
+    stride: u32,
+    padding: u32,
+    output_padding: u32,
+    dilation: u32,
+    dst_numel: u32,
+    _align: array<u32, 2>,
+    src_layout: TensorLayout,
+    kernel_layout: TensorLayout,
+    _pad: array<u32, 24>,
+}
+
+@group(0) @binding(0)
+var<storage, read_write> output_buf: array<u32>;
+
+@group(0) @binding(1)
+var<storage, read> src_buf: array<u32>;
+
+@group(0) @binding(2)
+var<storage, read> kernel_buf: array<u32>;
+
+@group(0) @binding(4)
+var<storage, read> params: ConvTranspose1dParams;
+
+@compute @workgroup_size(32)
+fn conv_transpose1d_bf16(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    let stride_wg = 32u * num_wg.x;
+    let p = params;
+    let in_layout = p.src_layout;
+    let k_layout = p.kernel_layout;
+    let l_k = k_layout.dims[2];
+    let c_out = k_layout.dims[1];
+    let c_in = in_layout.dims[1];
+    let l_in = in_layout.dims[2];
+    let l_out = p.l_out;
+    let stride = p.stride;
+    let padding = p.padding;
+    let dilation = p.dilation;
+
+    for (var tid = gid.x; tid < p.dst_numel; tid = tid + stride_wg) {
+        let b_idx = tid / (l_out * c_out);
+        let dst_c_idx = (tid / l_out) % c_out;
+        let out_x = tid % l_out;
+
+        let src_idx0 = in_layout.offset + b_idx * in_layout.strides[0];
+        var acc = 0.0;
+        for (var k_x = 0; k_x < i32(l_k); k_x = k_x + 1) {
+            let inp_x_stride = i32(out_x + padding) - k_x * i32(dilation);
+            if (inp_x_stride < 0 || inp_x_stride % i32(stride) != 0) {
+                continue;
+            }
+            let inp_x = inp_x_stride / i32(stride);
+            if (inp_x >= i32(l_in)) {
+                continue;
+            }
+            for (var src_c_idx = 0u; src_c_idx < c_in; src_c_idx = src_c_idx + 1u) {
+                let src_idx = src_idx0
+                    + src_c_idx * in_layout.strides[1]
+                    + u32(inp_x) * in_layout.strides[2];
+                let k_idx = k_layout.offset
+                    + src_c_idx * k_layout.strides[0]
+                    + dst_c_idx * k_layout.strides[1]
+                    + u32(k_x) * k_layout.strides[2];
+                acc += read_packed_bf16(src_buf[src_idx / 2u], src_idx) * read_packed_bf16(kernel_buf[k_idx / 2u], k_idx);
+            }
+        }
+        output_buf[tid / 2u] = pack_bf16_value(output_buf[tid / 2u], tid, acc);;
+    }
+}

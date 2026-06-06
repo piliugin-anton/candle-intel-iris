@@ -251,6 +251,7 @@ impl ReduceUniforms {
         src_elem_count: usize,
         dst_elem_count: usize,
         reduce_chunk_size: usize,
+        reduce_dim: usize,
         out_layout: &Layout,
         src_layout: &Layout,
     ) -> Self {
@@ -258,7 +259,7 @@ impl ReduceUniforms {
             src_elem_count: src_elem_count as u32,
             dst_elem_count: dst_elem_count as u32,
             reduce_chunk_size: reduce_chunk_size as u32,
-            _pad0: 0,
+            _pad0: reduce_dim as u32,
             out_layout: TensorLayoutUniform::from_layout(out_layout),
             src_layout: TensorLayoutUniform::from_layout(src_layout),
             _unused_layout: TensorLayoutUniform::default(),

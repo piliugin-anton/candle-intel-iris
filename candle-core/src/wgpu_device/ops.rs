@@ -12,10 +12,11 @@ use crate::backend::BackendStorage;
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::quantized::GgmlDType;
 use crate::wgsl::{
-    BINARY, BINARY_BF16, BINARY_F16, CMP, COPY, COPY2D, DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0,
-    DEQUANT_Q8_0, MATMUL_NAIVE, MATMUL_TILED, MATMUL_TILED_BF16, MATMUL_TILED_F16, MATMUL_TILED_VEC,
-    MATMUL_VEC_WIDTH, QMATMUL_Q4_0, QMATMUL_Q4_K, QMATMUL_Q5_0, QMATMUL_Q8_0, QUANT_Q4_0,
-    QUANT_Q5_0, QUANT_Q8_0, REDUCE, RMS_NORM, ROPE, SDPA_FULL, SDPA_VECTOR, SOFTMAX, UNARY,
+    BINARY, BINARY_BF16, BINARY_F16, CMP, COPY, COPY_BF16, COPY_F16, COPY2D, COPY2D_BF16, COPY2D_F16,
+    DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0, DEQUANT_Q8_0, MATMUL_NAIVE, MATMUL_TILED,
+    MATMUL_TILED_BF16, MATMUL_TILED_F16, MATMUL_TILED_VEC, MATMUL_VEC_WIDTH,
+    QMATMUL_Q4_0, QMATMUL_Q4_K, QMATMUL_Q5_0, QMATMUL_Q8_0, QUANT_Q4_0, QUANT_Q5_0, QUANT_Q8_0,
+    REDUCE, REDUCE_BF16, REDUCE_F16, RMS_NORM, ROPE, SDPA_FULL, SDPA_VECTOR, SOFTMAX, UNARY,
     UNARY_BF16, UNARY_F16, WHERE_COND,
 };
 use crate::{CpuStorage, DType, Error, Layout, Result as CandleResult, Shape};
@@ -32,6 +33,45 @@ fn require_f32(dtype: DType, op: &'static str) -> CandleResult<()> {
         Ok(())
     } else {
         Err(Error::UnsupportedDTypeForOp(dtype, op).bt())
+    }
+}
+
+pub(crate) fn require_float(dtype: DType, op: &'static str) -> CandleResult<()> {
+    match dtype {
+        DType::F32 | DType::F16 | DType::BF16 => Ok(()),
+        other => Err(Error::UnsupportedDTypeForOp(other, op).bt()),
+    }
+}
+
+pub(crate) fn float_type_suffix(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F16 => "f16",
+        DType::BF16 => "bf16",
+        _ => "f32",
+    }
+}
+
+fn copy_shader_source(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F16 => COPY_F16,
+        DType::BF16 => COPY_BF16,
+        _ => COPY,
+    }
+}
+
+fn copy2d_shader_source(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F16 => COPY2D_F16,
+        DType::BF16 => COPY2D_BF16,
+        _ => COPY2D,
+    }
+}
+
+fn reduce_shader_source(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F16 => REDUCE_F16,
+        DType::BF16 => REDUCE_BF16,
+        _ => REDUCE,
     }
 }
 
@@ -234,14 +274,15 @@ fn binary_entry_point_f16(kernel: &str) -> Option<&'static str> {
     }
 }
 
-fn reduce_entry_point(op: ReduceOp) -> Option<&'static str> {
-    match op {
-        ReduceOp::Sum => Some("reduce_sum_f32"),
-        ReduceOp::Max => Some("reduce_max_f32"),
-        ReduceOp::Min => Some("reduce_min_f32"),
-        ReduceOp::ArgMax => Some("reduce_argmax_f32"),
-        ReduceOp::ArgMin => Some("reduce_argmin_f32"),
-    }
+fn reduce_entry_point(op: ReduceOp, dtype: DType) -> Option<String> {
+    let base = match op {
+        ReduceOp::Sum => "reduce_sum",
+        ReduceOp::Max => "reduce_max",
+        ReduceOp::Min => "reduce_min",
+        ReduceOp::ArgMax => "reduce_argmax",
+        ReduceOp::ArgMin => "reduce_argmin",
+    };
+    Some(format!("{}_{}", base, float_type_suffix(dtype)))
 }
 
 fn compile_elemwise_kernel(
@@ -355,8 +396,9 @@ fn compile_matmul_kernel(device: &WgpuDevice, kernel: MatMulKernel) -> Result<Wg
     WgpuKernel::compile_with_workgroup_size(device, &tuned, entry, tile)
 }
 
-fn compile_reduce_kernel(device: &WgpuDevice, entry_point: &str) -> Result<WgpuKernel> {
-    let tuned = super::intel_caps::tune_shader_source(REDUCE, device.caps());
+fn compile_reduce_kernel(device: &WgpuDevice, dtype: DType, entry_point: &str) -> Result<WgpuKernel> {
+    let source = reduce_shader_source(dtype);
+    let tuned = super::intel_caps::tune_shader_source(source, device.caps());
     WgpuKernel::compile_with_workgroup_size(
         device,
         &tuned,
@@ -1292,21 +1334,40 @@ pub fn dispatch_reduce(
     layout: &Layout,
     reduce_dims: &[usize],
 ) -> CandleResult<WgpuStorage> {
-    require_f32(storage.dtype(), "reduce")?;
-
-    if matches!(op, ReduceOp::ArgMax | ReduceOp::ArgMin) && reduce_dims.len() != 1 {
-        return Err(Error::OnlySingleDimension {
-            op: if matches!(op, ReduceOp::ArgMax) {
-                "argmax"
-            } else {
-                "argmin"
-            },
-            dims: reduce_dims.to_vec(),
+    let dtype = storage.dtype();
+    require_float(dtype, "reduce")?;
+    let device_ref = storage.device();
+    let compute_dtype = device_ref.effective_dtype(dtype);
+    if compute_dtype != dtype {
+        let cast = storage.to_dtype(layout, compute_dtype)?;
+        let cast_layout = Layout::contiguous(layout.shape());
+        let out = dispatch_reduce(&cast, op, &cast_layout, reduce_dims)?;
+        let mut dst_dims = layout.dims().to_vec();
+        for &dim in reduce_dims {
+            dst_dims[dim] = 1;
         }
-        .bt());
+        let out_layout = Layout::contiguous(&Shape::from(dst_dims));
+        return out.to_dtype(&out_layout, dtype);
     }
 
-    let entry = reduce_entry_point(op)
+    if reduce_dims.len() != 1 {
+        if matches!(op, ReduceOp::ArgMax | ReduceOp::ArgMin) {
+            return Err(Error::OnlySingleDimension {
+                op: if matches!(op, ReduceOp::ArgMax) {
+                    "argmax"
+                } else {
+                    "argmin"
+                },
+                dims: reduce_dims.to_vec(),
+            }
+            .bt());
+        }
+        let cpu = storage.to_cpu_storage()?;
+        let out_cpu = cpu.reduce_op(op, layout, reduce_dims)?;
+        return WgpuStorage::from_cpu(storage.device(), &out_cpu).map_err(Error::from);
+    }
+
+    let entry = reduce_entry_point(op, compute_dtype)
         .ok_or_else(|| WgpuError::Message(format!("wgpu reduce op {:?} not available", op)))?;
 
     let src_dims = layout.dims();
@@ -1321,22 +1382,23 @@ pub fn dispatch_reduce(
     let dst_elem_count = dst_shape.elem_count();
     let arg_index = matches!(op, ReduceOp::ArgMax | ReduceOp::ArgMin);
     if dst_elem_count == 0 {
-        let dtype = if arg_index { DType::U32 } else { DType::F32 };
-        return WgpuStorage::alloc(storage.device(), &dst_shape, dtype).map_err(Error::from);
+        let out_dtype = if arg_index { DType::U32 } else { compute_dtype };
+        return WgpuStorage::alloc(storage.device(), &dst_shape, out_dtype).map_err(Error::from);
     }
     let reduce_chunk_size = src_elem_count / dst_elem_count;
 
     let device = storage.device().clone();
-    let out = WgpuStorage::alloc(&device, &dst_shape, DType::F32)?;
+    let out = WgpuStorage::alloc(&device, &dst_shape, compute_dtype)?;
     let uniforms = ReduceUniforms::new(
         src_elem_count,
         dst_elem_count,
         reduce_chunk_size,
+        reduce_dims[0],
         &dst_layout,
         layout,
     );
 
-    let kernel = compile_reduce_kernel(&device, entry)?;
+    let kernel = compile_reduce_kernel(&device, compute_dtype, &entry)?;
     let bind_group_builder = BindGroupBuilder::new();
     let in0 = buffer_offset(storage, layout);
     let bind_group = bind_group_builder
@@ -1383,15 +1445,36 @@ pub fn dispatch_copy_strided_src(
     dst_offset: usize,
     src_layout: &Layout,
 ) -> Result<()> {
-    if src.dtype() != DType::F32 || dst.dtype() != DType::F32 {
-        return Err(WgpuError::Message("wgpu copy_strided_src only supports f32".into()));
+    if src.dtype() != dst.dtype() {
+        return Err(WgpuError::Message(
+            "wgpu copy_strided_src dtype mismatch between src and dst".into(),
+        ));
     }
+    let dtype = src.dtype();
+    require_float(dtype, "copy_strided_src").map_err(|e| WgpuError::Message(e.to_string()))?;
     let device = src.device();
+    let compute_dtype = device.effective_dtype(dtype);
+    if compute_dtype != dtype {
+        let cast_src = src
+            .to_dtype(src_layout, compute_dtype)
+            .map_err(|e| WgpuError::Message(e.to_string()))?;
+        let cast_layout = Layout::contiguous(src_layout.shape());
+        let mut cast_dst = WgpuStorage::alloc(device, src_layout.shape(), compute_dtype)
+            .map_err(|e| WgpuError::Message(e.to_string()))?;
+        dispatch_copy_strided_src(&cast_src, &mut cast_dst, dst_offset, &cast_layout)?;
+        let out = cast_dst
+            .to_dtype(&cast_layout, dtype)
+            .map_err(|e| WgpuError::Message(e.to_string()))?;
+        *dst = out;
+        return Ok(());
+    }
+
     let elem_count = src_layout.shape().elem_count();
     let dst_shape = Shape::from(elem_count);
     let dst_layout = Layout::new(dst_shape.clone(), vec![1], dst_offset);
     let uniforms = KernelUniforms::new(elem_count, &dst_layout, src_layout, None);
-    let kernel = compile_copy_kernel(device, COPY, "copy_strided_f32")?;
+    let entry = format!("copy_strided_{}", float_type_suffix(compute_dtype));
+    let kernel = compile_copy_kernel(device, copy_shader_source(compute_dtype), &entry)?;
     let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
         device.device(),
         device.queue(),
@@ -1402,7 +1485,7 @@ pub fn dispatch_copy_strided_src(
     )?;
     let wg = device.caps().elem_workgroup_size;
     let grid = (elem_count as u32).div_ceil(wg);
-    dst.backing()
+    src.backing()
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;
     Ok(())
 }
@@ -1422,10 +1505,20 @@ pub fn dispatch_copy2d(
     dst: &mut WgpuStorage,
     params: Copy2dParams,
 ) -> Result<()> {
-    if src.dtype() != DType::F32 || dst.dtype() != DType::F32 {
-        return Err(WgpuError::Message("wgpu copy2d only supports f32".into()));
+    if src.dtype() != dst.dtype() {
+        return Err(WgpuError::Message(
+            "wgpu copy2d dtype mismatch between src and dst".into(),
+        ));
     }
+    let dtype = src.dtype();
+    require_float(dtype, "copy2d").map_err(|e| WgpuError::Message(e.to_string()))?;
     let device = src.device();
+    let compute_dtype = device.effective_dtype(dtype);
+    if compute_dtype != dtype {
+        return Err(WgpuError::Message(
+            "wgpu copy2d f16/bf16 fallback requires contiguous f32 tensors".into(),
+        ));
+    }
     let uniforms = Copy2dUniforms {
         d1: params.d1 as u32,
         d2: params.d2 as u32,
@@ -1435,10 +1528,11 @@ pub fn dispatch_copy2d(
         dst_offset: params.dst_offset as u32,
         _pad: [0; 66],
     };
+    let entry = format!("copy2d_{}", float_type_suffix(compute_dtype));
     let kernel = WgpuKernel::compile_with_workgroup_size(
         device,
-        COPY2D,
-        "copy2d_f32",
+        copy2d_shader_source(compute_dtype),
+        &entry,
         device.caps().elem_workgroup_size,
     )?;
     let dummy = Layout::contiguous((1,));
@@ -1895,12 +1989,27 @@ mod tests {
 
     #[test]
     fn reduce_entry_points() {
-        assert_eq!(reduce_entry_point(ReduceOp::Sum), Some("reduce_sum_f32"));
-        assert_eq!(reduce_entry_point(ReduceOp::Max), Some("reduce_max_f32"));
+        assert_eq!(
+            reduce_entry_point(ReduceOp::Sum, DType::F32),
+            Some("reduce_sum_f32".to_string())
+        );
+        assert_eq!(
+            reduce_entry_point(ReduceOp::Max, DType::F16),
+            Some("reduce_max_f16".to_string())
+        );
         assert_eq!(unary_entry_point("ugelu"), Some("gelu_f32"));
-        assert_eq!(reduce_entry_point(ReduceOp::Min), Some("reduce_min_f32"));
-        assert_eq!(reduce_entry_point(ReduceOp::ArgMax), Some("reduce_argmax_f32"));
-        assert_eq!(reduce_entry_point(ReduceOp::ArgMin), Some("reduce_argmin_f32"));
+        assert_eq!(
+            reduce_entry_point(ReduceOp::Min, DType::BF16),
+            Some("reduce_min_bf16".to_string())
+        );
+        assert_eq!(
+            reduce_entry_point(ReduceOp::ArgMax, DType::F32),
+            Some("reduce_argmax_f32".to_string())
+        );
+        assert_eq!(
+            reduce_entry_point(ReduceOp::ArgMin, DType::F16),
+            Some("reduce_argmin_f16".to_string())
+        );
     }
 
     #[test]
@@ -1983,5 +2092,15 @@ mod tests {
         WgpuKernel::compile_with_workgroup_size(&device, QUANT_Q4_0, "quant_q4_0_f32", 1).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, QUANT_Q5_0, "quant_q5_0_f32", 1).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, QUANT_Q8_0, "quant_q8_0_f32", 1).unwrap();
+        WgpuKernel::compile_with_workgroup_size(&device, COPY_BF16, "copy_strided_bf16", 32).unwrap();
+        WgpuKernel::compile_with_workgroup_size(&device, COPY2D_BF16, "copy2d_bf16", 32).unwrap();
+        compile_reduce_kernel(&device, DType::BF16, "reduce_sum_bf16").unwrap();
+        WgpuKernel::compile_with_workgroup_size(
+            &device,
+            crate::wgsl::POOL2D_BF16,
+            "avg_pool2d_bf16",
+            32,
+        )
+        .unwrap();
     }
 }

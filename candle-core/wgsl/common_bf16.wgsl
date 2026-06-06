@@ -23,7 +23,7 @@ struct KernelParams {
 }
 
 @group(0) @binding(0)
-var<storage, read_write> output_buf: array<u32>;
+var<storage, read_write> output_buf: array<atomic<u32>>;
 
 @group(0) @binding(1)
 var<storage, read> input0_buf: array<u32>;
@@ -106,9 +106,16 @@ fn store_bf16_out(idx: u32, value: f32) {
     let shift = byte_off * 8u;
     let bf16 = f32_to_bf16_bits(value);
     let mask = ~(0xFFFFu << shift);
-    var packed = output_buf[word];
-    packed = (packed & mask) | (bf16 << shift);
-    output_buf[word] = packed;
+    let contribution = bf16 << shift;
+    var old = atomicLoad(&output_buf[word]);
+    loop {
+        let new_val = (old & mask) | contribution;
+        let exch = atomicCompareExchangeWeak(&output_buf[word], old, new_val);
+        if (exch.exchanged) {
+            break;
+        }
+        old = exch.old_value;
+    }
 }
 
 fn grid_stride_x(num_wg: vec3<u32>) -> u32 {

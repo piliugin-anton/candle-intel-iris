@@ -3,11 +3,11 @@
 // One workgroup produces one output element. Dispatch `dst_elem_count` workgroups
 // of size `REDUCE_WG_SIZE` (32, tuned for Intel integrated GPUs).
 //
-// Entry points: reduce_sum_f32, reduce_mean_f32, reduce_max_f32, reduce_min_f32,
-//               reduce_argmax_f32, reduce_argmin_f32
+// Entry points: reduce_sum_bf16, reduce_mean_bf16, reduce_max_bf16, reduce_min_bf16,
+//               reduce_argmax_bf16, reduce_argmin_bf16
 
 @compute @workgroup_size(REDUCE_WG_SIZE)
-fn reduce_sum_f32(
+fn reduce_sum_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
@@ -29,12 +29,12 @@ fn reduce_sum_f32(
     workgroup_reduce_sum(tid);
 
     if (tid == 0u) {
-        reduce_out_f32[dst_id] = wg_sum[0];
+        reduce_store_out(dst_id, wg_sum[0]);
     }
 }
 
 @compute @workgroup_size(REDUCE_WG_SIZE)
-fn reduce_mean_f32(
+fn reduce_mean_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
@@ -57,12 +57,12 @@ fn reduce_mean_f32(
 
     if (tid == 0u) {
         let count = f32(chunk);
-        reduce_out_f32[dst_id] = wg_sum[0] / count;
+        reduce_store_out(dst_id, wg_sum[0] / count);
     }
 }
 
 @compute @workgroup_size(REDUCE_WG_SIZE)
-fn reduce_max_f32(
+fn reduce_max_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
@@ -84,12 +84,12 @@ fn reduce_max_f32(
     workgroup_reduce_max(tid);
 
     if (tid == 0u) {
-        reduce_out_f32[dst_id] = wg_max_val[0];
+        reduce_store_out(dst_id, wg_max_val[0]);
     }
 }
 
 @compute @workgroup_size(REDUCE_WG_SIZE)
-fn reduce_min_f32(
+fn reduce_min_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
@@ -111,13 +111,13 @@ fn reduce_min_f32(
     workgroup_reduce_min(tid);
 
     if (tid == 0u) {
-        reduce_out_f32[dst_id] = wg_max_val[0];
+        reduce_store_out(dst_id, wg_max_val[0]);
     }
 }
 
 // Argmax along the reduced dimension; stores the index as f32.
 @compute @workgroup_size(REDUCE_WG_SIZE)
-fn reduce_argmax_f32(
+fn reduce_argmax_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
@@ -149,13 +149,13 @@ fn reduce_argmax_f32(
     workgroup_reduce_max(tid);
 
     if (tid == 0u) {
-        reduce_out_f32[dst_id] = f32(wg_max_idx[0]);
+        reduce_store_out(dst_id, f32(wg_max_idx[0]));
     }
 }
 
 // Argmin along the reduced dimension; stores the index as f32.
 @compute @workgroup_size(REDUCE_WG_SIZE)
-fn reduce_argmin_f32(
+fn reduce_argmin_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
@@ -187,6 +187,6 @@ fn reduce_argmin_f32(
     workgroup_reduce_argmin(tid);
 
     if (tid == 0u) {
-        reduce_out_f32[dst_id] = f32(wg_max_idx[0]);
+        reduce_store_out(dst_id, f32(wg_max_idx[0]));
     }
 }

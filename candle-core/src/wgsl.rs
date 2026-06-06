@@ -25,9 +25,25 @@ pub const COPY: &str = concat!(
     include_str!("../wgsl/common.wgsl"),
     include_str!("../wgsl/copy.wgsl")
 );
+pub const COPY_F16: &str = concat!(
+    include_str!("../wgsl/common_f16.wgsl"),
+    include_str!("../wgsl/copy_f16.wgsl")
+);
+pub const COPY_BF16: &str = concat!(
+    include_str!("../wgsl/common_bf16.wgsl"),
+    include_str!("../wgsl/copy_bf16.wgsl")
+);
 pub const REDUCE: &str = concat!(
     include_str!("../wgsl/reduce_common.wgsl"),
     include_str!("../wgsl/reduce.wgsl")
+);
+pub const REDUCE_F16: &str = concat!(
+    include_str!("../wgsl/reduce_common_f16.wgsl"),
+    include_str!("../wgsl/reduce_f16.wgsl")
+);
+pub const REDUCE_BF16: &str = concat!(
+    include_str!("../wgsl/reduce_common_bf16.wgsl"),
+    include_str!("../wgsl/reduce_bf16.wgsl")
 );
 pub const MATMUL_NAIVE: &str = concat!(
     include_str!("../wgsl/matmul_common.wgsl"),
@@ -122,17 +138,35 @@ pub const MATMUL_VEC_WIDTH: u32 = 4;
 
 pub const CAST: &str = include_str!("../wgsl/cast.wgsl");
 pub const COPY2D: &str = include_str!("../wgsl/copy2d.wgsl");
+pub const COPY2D_F16: &str = include_str!("../wgsl/copy2d_f16.wgsl");
+pub const COPY2D_BF16: &str = include_str!("../wgsl/copy2d_bf16.wgsl");
 pub const RMS_NORM: &str = include_str!("../wgsl/rms_norm.wgsl");
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
 pub const WHERE_COND: &str = include_str!("../wgsl/where_cond.wgsl");
 pub const IM2COL2D: &str = include_str!("../wgsl/im2col2d.wgsl");
+pub const IM2COL2D_F16: &str = include_str!("../wgsl/im2col2d_f16.wgsl");
+pub const IM2COL2D_BF16: &str = include_str!("../wgsl/im2col2d_bf16.wgsl");
 pub const IM2COL1D: &str = include_str!("../wgsl/im2col1d.wgsl");
+pub const IM2COL1D_F16: &str = include_str!("../wgsl/im2col1d_f16.wgsl");
+pub const IM2COL1D_BF16: &str = include_str!("../wgsl/im2col1d_bf16.wgsl");
 pub const POOL2D: &str = include_str!("../wgsl/pool2d.wgsl");
+pub const POOL2D_F16: &str = include_str!("../wgsl/pool2d_f16.wgsl");
+pub const POOL2D_BF16: &str = include_str!("../wgsl/pool2d_bf16.wgsl");
 pub const UPSAMPLE_NEAREST1D: &str = include_str!("../wgsl/upsample_nearest1d.wgsl");
+pub const UPSAMPLE_NEAREST1D_F16: &str = include_str!("../wgsl/upsample_nearest1d_f16.wgsl");
+pub const UPSAMPLE_NEAREST1D_BF16: &str = include_str!("../wgsl/upsample_nearest1d_bf16.wgsl");
 pub const UPSAMPLE_NEAREST2D: &str = include_str!("../wgsl/upsample_nearest2d.wgsl");
+pub const UPSAMPLE_NEAREST2D_F16: &str = include_str!("../wgsl/upsample_nearest2d_f16.wgsl");
+pub const UPSAMPLE_NEAREST2D_BF16: &str = include_str!("../wgsl/upsample_nearest2d_bf16.wgsl");
 pub const UPSAMPLE_BILINEAR2D: &str = include_str!("../wgsl/upsample_bilinear2d.wgsl");
+pub const UPSAMPLE_BILINEAR2D_F16: &str = include_str!("../wgsl/upsample_bilinear2d_f16.wgsl");
+pub const UPSAMPLE_BILINEAR2D_BF16: &str = include_str!("../wgsl/upsample_bilinear2d_bf16.wgsl");
 pub const CONV_TRANSPOSE2D: &str = include_str!("../wgsl/conv_transpose2d.wgsl");
+pub const CONV_TRANSPOSE2D_F16: &str = include_str!("../wgsl/conv_transpose2d_f16.wgsl");
+pub const CONV_TRANSPOSE2D_BF16: &str = include_str!("../wgsl/conv_transpose2d_bf16.wgsl");
 pub const CONV_TRANSPOSE1D: &str = include_str!("../wgsl/conv_transpose1d.wgsl");
+pub const CONV_TRANSPOSE1D_F16: &str = include_str!("../wgsl/conv_transpose1d_f16.wgsl");
+pub const CONV_TRANSPOSE1D_BF16: &str = include_str!("../wgsl/conv_transpose1d_bf16.wgsl");
 pub const INDEXING: &str = include_str!("../wgsl/indexing.wgsl");
 pub const CONST_SET_F32: &str = concat!(
     include_str!("../wgsl/common.wgsl"),
@@ -162,7 +196,11 @@ mod tests {
         assert!(UNARY.contains("fn affine_f32"));
         assert!(BINARY.contains("fn add_f32"));
         assert!(COPY.contains("fn copy_strided_f32"));
+        assert!(COPY_F16.contains("fn copy_strided_f16"));
+        assert!(COPY_BF16.contains("fn copy_strided_bf16"));
         assert!(REDUCE.contains("fn reduce_sum_f32"));
+        assert!(REDUCE_F16.contains("fn reduce_sum_f16"));
+        assert!(REDUCE_BF16.contains("fn reduce_sum_bf16"));
         assert!(REDUCE.contains("fn reduce_min_f32"));
         assert!(MATMUL_NAIVE.contains("fn matmul_naive_f32"));
         assert!(MATMUL_TILED.contains("fn matmul_tiled_f32"));
@@ -195,8 +233,13 @@ mod tests {
         assert!(QUANT_Q5_0.contains("fn quant_q5_0_f32"));
         assert!(QUANT_Q8_0.contains("fn quant_q8_0_f32"));
         assert!(IM2COL2D.contains("fn im2col2d_f32"));
+        assert!(IM2COL2D_F16.contains("fn im2col2d_f16"));
+        assert!(IM2COL2D_BF16.contains("fn im2col2d_bf16"));
         assert!(IM2COL1D.contains("fn im2col1d_f32"));
         assert!(POOL2D.contains("fn avg_pool2d_f32"));
+        assert!(POOL2D_BF16.contains("fn avg_pool2d_bf16"));
+        assert!(COPY2D_F16.contains("fn copy2d_f16"));
+        assert!(COPY2D_BF16.contains("fn copy2d_bf16"));
         assert!(POOL2D.contains("fn max_pool2d_f32"));
         assert!(UPSAMPLE_NEAREST1D.contains("fn upsample_nearest1d_f32"));
         assert!(UPSAMPLE_NEAREST2D.contains("fn upsample_nearest2d_f32"));
