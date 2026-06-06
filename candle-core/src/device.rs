@@ -7,8 +7,16 @@ use crate::{CpuStorage, DType, Result, Shape, Storage, WithDType};
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum DeviceLocation {
     Cpu,
-    Cuda { gpu_id: usize },
-    Metal { gpu_id: usize },
+    Cuda {
+        gpu_id: usize,
+    },
+    Metal {
+        gpu_id: usize,
+    },
+    #[cfg(feature = "wgpu")]
+    Wgpu {
+        gpu_id: usize,
+    },
 }
 
 /// Cpu, Cuda, or Metal
@@ -17,6 +25,8 @@ pub enum Device {
     Cpu,
     Cuda(crate::CudaDevice),
     Metal(crate::MetalDevice),
+    #[cfg(feature = "wgpu")]
+    Wgpu(Box<crate::WgpuDevice>),
 }
 
 pub trait NdArray {
@@ -240,6 +250,8 @@ impl Device {
             Self::Cuda(d) => Ok(d),
             Self::Cpu => crate::bail!("expected a cuda device, got cpu"),
             Self::Metal(_) => crate::bail!("expected a cuda device, got Metal"),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(_) => crate::bail!("expected a cuda device, got wgpu"),
         }
     }
 
@@ -248,6 +260,23 @@ impl Device {
             Self::Cuda(_) => crate::bail!("expected a metal device, got cuda"),
             Self::Cpu => crate::bail!("expected a metal device, got cpu"),
             Self::Metal(d) => Ok(d),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(_) => crate::bail!("expected a metal device, got wgpu"),
+        }
+    }
+
+    #[cfg(feature = "wgpu")]
+    pub fn new_wgpu() -> Result<Self> {
+        Ok(Self::Wgpu(Box::new(crate::WgpuDevice::new_default()?)))
+    }
+
+    #[cfg(feature = "wgpu")]
+    pub fn as_wgpu_device(&self) -> Result<&crate::WgpuDevice> {
+        match self {
+            Self::Wgpu(d) => Ok(d.as_ref()),
+            Self::Cpu => crate::bail!("expected a wgpu device, got cpu"),
+            Self::Cuda(_) => crate::bail!("expected a wgpu device, got cuda"),
+            Self::Metal(_) => crate::bail!("expected a wgpu device, got metal"),
         }
     }
 
@@ -264,6 +293,8 @@ impl Device {
             Self::Cpu => CpuDevice.set_seed(seed),
             Self::Cuda(c) => c.set_seed(seed),
             Self::Metal(m) => m.set_seed(seed),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(w) => w.set_seed(seed),
         }
     }
 
@@ -272,6 +303,8 @@ impl Device {
             Self::Cpu => CpuDevice.get_current_seed(),
             Self::Cuda(c) => c.get_current_seed(),
             Self::Metal(m) => m.get_current_seed(),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(w) => w.get_current_seed(),
         }
     }
 
@@ -280,6 +313,8 @@ impl Device {
             (Self::Cpu, Self::Cpu) => true,
             (Self::Cuda(lhs), Self::Cuda(rhs)) => lhs.same_device(rhs),
             (Self::Metal(lhs), Self::Metal(rhs)) => lhs.same_device(rhs),
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(lhs), Self::Wgpu(rhs)) => lhs.same_device(rhs),
             _ => false,
         }
     }
@@ -289,6 +324,8 @@ impl Device {
             Self::Cpu => DeviceLocation::Cpu,
             Self::Cuda(device) => device.location(),
             Device::Metal(device) => device.location(),
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => device.location(),
         }
     }
 
@@ -304,9 +341,16 @@ impl Device {
         matches!(self, Self::Metal(_))
     }
 
+    #[cfg(feature = "wgpu")]
+    pub fn is_wgpu(&self) -> bool {
+        matches!(self, Self::Wgpu(_))
+    }
+
     pub fn supports_bf16(&self) -> bool {
         match self {
             Self::Cuda(_) | Self::Metal(_) => true,
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(device) => device.caps().supports_native_bf16(),
             Self::Cpu => false,
         }
     }
@@ -362,6 +406,11 @@ impl Device {
                 let storage = device.rand_uniform(shape, dtype, lo, up)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                let storage = device.rand_uniform(shape, dtype, lo, up)?;
+                Ok(Storage::from_wgpu(storage))
+            }
         }
     }
 
@@ -400,6 +449,11 @@ impl Device {
                 let storage = device.rand_normal(shape, dtype, mean, std)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                let storage = device.rand_normal(shape, dtype, mean, std)?;
+                Ok(Storage::from_wgpu(storage))
+            }
         }
     }
 
@@ -426,6 +480,11 @@ impl Device {
                 let storage = device.zeros_impl(shape, dtype)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                let storage = device.zeros_impl(shape, dtype)?;
+                Ok(Storage::from_wgpu(storage))
+            }
         }
     }
 
@@ -443,6 +502,11 @@ impl Device {
                 let storage = device.alloc_uninit(shape, dtype)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                let storage = device.alloc_uninit(shape, dtype)?;
+                Ok(Storage::from_wgpu(storage))
+            }
         }
     }
 
@@ -456,6 +520,11 @@ impl Device {
             Device::Metal(device) => {
                 let storage = device.storage_from_slice(data)?;
                 Ok(Storage::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                let storage = device.storage_from_slice(data)?;
+                Ok(Storage::from_wgpu(storage))
             }
         }
     }
@@ -473,6 +542,12 @@ impl Device {
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                let storage = array.to_cpu_storage();
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::from_wgpu(storage))
+            }
         }
     }
 
@@ -489,6 +564,12 @@ impl Device {
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Device::Wgpu(device) => {
+                let storage = S::to_cpu_storage_owned(data);
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::from_wgpu(storage))
+            }
         }
     }
 
@@ -497,6 +578,8 @@ impl Device {
             Self::Cpu => Ok(()),
             Self::Cuda(d) => d.synchronize(),
             Self::Metal(d) => d.synchronize(),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(d) => d.synchronize(),
         }
     }
 }

@@ -33,6 +33,8 @@ safetensors = { workspace = true }
 thiserror = { workspace = true }
 yoke = { workspace = true }
 zip = { workspace = true }
+wgpu = { workspace = true, optional = true, features = ["noop"] }
+pollster = { workspace = true, optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokenizers = { workspace = true, features = ["onig"] }
 
@@ -58,6 +60,7 @@ metal = [
     "candle-ug?/metal",
 ]
 ug = ["dep:candle-ug"]
+wgpu = ["dep:wgpu", "dep:pollster"]
 
 [[bench]]
 name = "bench_main"
@@ -70,3 +73,7 @@ required-features = ["metal"]
 [[example]]
 name = "cuda_basics"
 required-features = ["cuda"]
+
+[[example]]
+name = "wgpu_bench"
+required-features = ["wgpu"]

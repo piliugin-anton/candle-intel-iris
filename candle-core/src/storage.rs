@@ -1,6 +1,8 @@
 use crate::backend::BackendStorage;
 use crate::op::{self, CmpOp, ReduceOp};
 use crate::scalar::Scalar;
+#[cfg(feature = "wgpu")]
+use crate::WgpuStorage;
 use crate::{CpuStorage, CudaStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
 use crate::{CustomOp1, CustomOp2, CustomOp3, InplaceOp1, InplaceOp2, InplaceOp3};
 
@@ -11,6 +13,15 @@ pub enum Storage {
     Cpu(CpuStorage),
     Cuda(CudaStorage),
     Metal(MetalStorage),
+    #[cfg(feature = "wgpu")]
+    Wgpu(Box<WgpuStorage>),
+}
+
+#[cfg(feature = "wgpu")]
+impl Storage {
+    pub(crate) fn from_wgpu(storage: WgpuStorage) -> Self {
+        Self::Wgpu(Box::new(storage))
+    }
 }
 
 impl Storage {
@@ -25,6 +36,11 @@ impl Storage {
                 let storage = storage.try_clone(layout)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.try_clone(layout)?;
+                Ok(Self::from_wgpu(storage))
+            }
         }
     }
 
@@ -33,6 +49,8 @@ impl Storage {
             Self::Cpu(_) => Device::Cpu,
             Self::Cuda(storage) => Device::Cuda(storage.device().clone()),
             Self::Metal(storage) => Device::Metal(storage.device().clone()),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => Device::Wgpu(Box::new(storage.device().clone())),
         }
     }
 
@@ -41,6 +59,8 @@ impl Storage {
             Self::Cpu(storage) => storage.dtype(),
             Self::Cuda(storage) => storage.dtype(),
             Self::Metal(storage) => storage.dtype(),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => storage.dtype(),
         }
     }
 
@@ -49,8 +69,19 @@ impl Storage {
         let rhs_device = rhs.device();
         let lhs = lhs_device.location();
         let rhs = rhs_device.location();
-        let same_device = if self.device().is_metal() {
-            // On metal, we require the device to be exactly the same rather than
+        let device = self.device();
+        let requires_exact_device = device.is_metal() || {
+            #[cfg(feature = "wgpu")]
+            {
+                device.is_wgpu()
+            }
+            #[cfg(not(feature = "wgpu"))]
+            {
+                false
+            }
+        };
+        let same_device = if requires_exact_device {
+            // On metal/wgpu, we require the device to be exactly the same rather than
             // having the same location. In cuda this is not necessary as all CudaDevice on the
             // same GPU will use the same cuda stream.
             lhs_device.same_device(&rhs_device)
@@ -79,6 +110,8 @@ impl Storage {
             Storage::Cpu(storage) => storage.const_set(v, l),
             Storage::Cuda(storage) => storage.const_set(v, l),
             Storage::Metal(storage) => storage.const_set(v, l),
+            #[cfg(feature = "wgpu")]
+            Storage::Wgpu(storage) => storage.const_set(v, l),
         }
     }
 
@@ -95,6 +128,11 @@ impl Storage {
             Self::Metal(storage) => {
                 let storage = storage.affine(layout, mul, add)?;
                 Ok(Self::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.affine(layout, mul, add)?;
+                Ok(Self::from_wgpu(storage))
             }
         }
     }
@@ -113,6 +151,11 @@ impl Storage {
                 let storage = storage.powf(layout, alpha)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.powf(layout, alpha)?;
+                Ok(Self::from_wgpu(storage))
+            }
         }
     }
 
@@ -129,6 +172,11 @@ impl Storage {
             Self::Metal(storage) => {
                 let storage = storage.elu(layout, alpha)?;
                 Ok(Self::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.elu(layout, alpha)?;
+                Ok(Self::from_wgpu(storage))
             }
         }
     }
@@ -154,6 +202,11 @@ impl Storage {
             (Self::Metal(lhs), Self::Metal(rhs)) => {
                 let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(lhs), Self::Wgpu(rhs)) => {
+                let storage = lhs.cmp(op, rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::from_wgpu(storage))
             }
             (lhs, rhs) => {
                 // Should not happen because of the same device check above but we're defensive
@@ -182,6 +235,11 @@ impl Storage {
                 let storage = storage.reduce_op(op, layout, s)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.reduce_op(op, layout, s)?;
+                Ok(Self::from_wgpu(storage))
+            }
         }
     }
 
@@ -199,6 +257,11 @@ impl Storage {
                 let storage = storage.to_dtype(layout, dtype)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.to_dtype(layout, dtype)?;
+                Ok(Self::from_wgpu(storage))
+            }
         }
     }
 
@@ -215,6 +278,11 @@ impl Storage {
             Self::Metal(storage) => {
                 let (storage, shape) = c.metal_fwd(storage, l)?;
                 Ok((Self::Metal(storage), shape))
+            }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let (storage, shape) = c.wgpu_fwd(storage, l)?;
+                Ok((Self::from_wgpu(storage), shape))
             }
         }
     }
@@ -239,6 +307,11 @@ impl Storage {
             (Self::Metal(s1), Self::Metal(s2)) => {
                 let (s, shape) = c.metal_fwd(s1, l1, s2, l2)?;
                 Ok((Self::Metal(s), shape))
+            }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(s1), Self::Wgpu(s2)) => {
+                let (s, shape) = c.wgpu_fwd(s1, l1, s2, l2)?;
+                Ok((Self::from_wgpu(s), shape))
             }
             _ => unreachable!(),
         }
@@ -268,6 +341,11 @@ impl Storage {
                 let (s, shape) = c.metal_fwd(s1, l1, s2, l2, s3, l3)?;
                 Ok((Self::Metal(s), shape))
             }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(s1), Self::Wgpu(s2), Self::Wgpu(s3)) => {
+                let (s, shape) = c.wgpu_fwd(s1, l1, s2, l2, s3, l3)?;
+                Ok((Self::from_wgpu(s), shape))
+            }
             _ => unreachable!(),
         }
     }
@@ -277,6 +355,8 @@ impl Storage {
             Self::Cpu(storage) => c.cpu_fwd(storage, l),
             Self::Cuda(storage) => c.cuda_fwd(storage, l),
             Self::Metal(storage) => c.metal_fwd(storage, l),
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => c.wgpu_fwd(storage, l),
         }
     }
 
@@ -292,6 +372,8 @@ impl Storage {
             (Self::Cpu(s1), Self::Cpu(s2)) => c.cpu_fwd(s1, l1, s2, l2),
             (Self::Cuda(s1), Self::Cuda(s2)) => c.cuda_fwd(s1, l1, s2, l2),
             (Self::Metal(s1), Self::Metal(s2)) => c.metal_fwd(s1, l1, s2, l2),
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(s1), Self::Wgpu(s2)) => c.wgpu_fwd(s1, l1, s2, l2),
             _ => unreachable!(),
         }
     }
@@ -313,6 +395,8 @@ impl Storage {
             (Self::Metal(s1), Self::Metal(s2), Self::Metal(s3)) => {
                 c.metal_fwd(s1, l1, s2, l2, s3, l3)
             }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(s1), Self::Wgpu(s2), Self::Wgpu(s3)) => c.wgpu_fwd(s1, l1, s2, l2, s3, l3),
             _ => unreachable!(),
         }
     }
@@ -330,6 +414,11 @@ impl Storage {
             Self::Metal(storage) => {
                 let storage = storage.unary_impl::<B>(layout)?;
                 Ok(Self::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.unary_impl::<B>(layout)?;
+                Ok(Self::from_wgpu(storage))
             }
         }
     }
@@ -354,6 +443,11 @@ impl Storage {
             (Self::Metal(lhs), Self::Metal(rhs)) => {
                 let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
                 Ok(Self::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(lhs), Self::Wgpu(rhs)) => {
+                let storage = lhs.binary_impl::<B>(rhs, lhs_layout, rhs_layout)?;
+                Ok(Self::from_wgpu(storage))
             }
             (lhs, rhs) => {
                 // Should not happen because of the same device check above but we're defensive
@@ -390,6 +484,11 @@ impl Storage {
                 let s = inp.conv1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
             }
+            #[cfg(feature = "wgpu")]
+            (Storage::Wgpu(inp), Storage::Wgpu(kernel)) => {
+                let s = inp.conv1d(l, kernel, kernel_l, params)?;
+                Ok(Self::from_wgpu(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -420,6 +519,11 @@ impl Storage {
             (Storage::Metal(inp), Storage::Metal(kernel)) => {
                 let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
+            }
+            #[cfg(feature = "wgpu")]
+            (Storage::Wgpu(inp), Storage::Wgpu(kernel)) => {
+                let s = inp.conv_transpose1d(l, kernel, kernel_l, params)?;
+                Ok(Self::from_wgpu(s))
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -452,6 +556,11 @@ impl Storage {
                 let s = inp.conv2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
             }
+            #[cfg(feature = "wgpu")]
+            (Storage::Wgpu(inp), Storage::Wgpu(kernel)) => {
+                let s = inp.conv2d(l, kernel, kernel_l, params)?;
+                Ok(Self::from_wgpu(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -483,6 +592,11 @@ impl Storage {
                 let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
                 Ok(Self::Metal(s))
             }
+            #[cfg(feature = "wgpu")]
+            (Storage::Wgpu(inp), Storage::Wgpu(kernel)) => {
+                let s = inp.conv_transpose2d(l, kernel, kernel_l, params)?;
+                Ok(Self::from_wgpu(s))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -511,6 +625,11 @@ impl Storage {
                 let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.avg_pool2d(layout, kernel_size, stride)?;
+                Ok(Self::from_wgpu(storage))
+            }
         }
     }
 
@@ -533,6 +652,11 @@ impl Storage {
                 let storage = storage.max_pool2d(layout, kernel_size, stride)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.max_pool2d(layout, kernel_size, stride)?;
+                Ok(Self::from_wgpu(storage))
+            }
         }
     }
 
@@ -550,6 +674,11 @@ impl Storage {
                 let storage = storage.upsample_nearest1d(layout, sz)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.upsample_nearest1d(layout, sz)?;
+                Ok(Self::from_wgpu(storage))
+            }
         }
     }
 
@@ -566,6 +695,11 @@ impl Storage {
             Self::Metal(storage) => {
                 let storage = storage.upsample_nearest2d(layout, h, w)?;
                 Ok(Self::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage = storage.upsample_nearest2d(layout, h, w)?;
+                Ok(Self::from_wgpu(storage))
             }
         }
     }
@@ -595,6 +729,12 @@ impl Storage {
                     storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            Self::Wgpu(storage) => {
+                let storage =
+                    storage.upsample_bilinear2d(layout, h, w, align_corners, scale_h, scale_w)?;
+                Ok(Self::from_wgpu(storage))
+            }
         }
     }
 
@@ -621,6 +761,11 @@ impl Storage {
             (Self::Metal(cond), Self::Metal(t), Self::Metal(f)) => {
                 let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
                 Ok(Self::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(cond), Self::Wgpu(t), Self::Wgpu(f)) => {
+                let storage = cond.where_cond(layout, t, layout_t, f, layout_f)?;
+                Ok(Self::from_wgpu(storage))
             }
             (_, lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -652,6 +797,11 @@ impl Storage {
                 let storage = s.gather(l, indexes, indexes_l, d)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(s), Self::Wgpu(indexes)) => {
+                let storage = s.gather(l, indexes, indexes_l, d)?;
+                Ok(Self::from_wgpu(storage))
+            }
             _ => unreachable!(),
         }
     }
@@ -675,6 +825,10 @@ impl Storage {
                 s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             (Self::Metal(s), Self::Metal(indexes), Self::Metal(source)) => {
+                s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
+            }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(s), Self::Wgpu(indexes), Self::Wgpu(source)) => {
                 s.scatter_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             _ => unreachable!(),
@@ -701,6 +855,10 @@ impl Storage {
                 s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             (Self::Metal(s), Self::Metal(indexes), Self::Metal(source)) => {
+                s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
+            }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(s), Self::Wgpu(indexes), Self::Wgpu(source)) => {
                 s.scatter_add_set(l, indexes, indexes_l, source, source_l, d)?;
             }
             _ => unreachable!(),
@@ -732,6 +890,11 @@ impl Storage {
                 let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(s), Self::Wgpu(indexes), Self::Wgpu(source)) => {
+                let storage = s.index_add(l, indexes, indexes_l, source, source_l, d)?;
+                Ok(Self::from_wgpu(storage))
+            }
             _ => unreachable!(),
         }
     }
@@ -756,6 +919,11 @@ impl Storage {
             (Self::Metal(lhs), Self::Metal(rhs)) => {
                 let storage = lhs.index_select(rhs, lhs_l, rhs_l, d)?;
                 Ok(Self::Metal(storage))
+            }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(lhs), Self::Wgpu(rhs)) => {
+                let storage = lhs.index_select(rhs, lhs_l, rhs_l, d)?;
+                Ok(Self::from_wgpu(storage))
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
@@ -788,6 +956,11 @@ impl Storage {
                 let storage = lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)?;
                 Ok(Self::Metal(storage))
             }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(lhs), Self::Wgpu(rhs)) => {
+                let storage = lhs.matmul(rhs, bmnk, lhs_layout, rhs_layout)?;
+                Ok(Self::from_wgpu(storage))
+            }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -810,6 +983,8 @@ impl Storage {
             (Self::Metal(src), Self::Metal(dst)) => {
                 Ok(src.copy_strided_src(dst, dst_offset, src_l)?)
             }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(src), Self::Wgpu(dst)) => Ok(src.copy_strided_src(dst, dst_offset, src_l)?),
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {
                 lhs: lhs.device().location(),
                 rhs: rhs.device().location(),
@@ -836,6 +1011,10 @@ impl Storage {
                 Ok(src.copy2d(dst, d1, d2, src_s, dst_s, src_o, dst_o)?)
             }
             (Self::Metal(src), Self::Metal(dst)) => {
+                Ok(src.copy2d(dst, d1, d2, src_s, dst_s, src_o, dst_o)?)
+            }
+            #[cfg(feature = "wgpu")]
+            (Self::Wgpu(src), Self::Wgpu(dst)) => {
                 Ok(src.copy2d(dst, d1, d2, src_s, dst_s, src_o, dst_o)?)
             }
             (lhs, rhs) => Err(Error::DeviceMismatchBinaryOp {

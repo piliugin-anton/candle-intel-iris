@@ -1,5 +1,7 @@
 use crate::op::{BackpropOp, Op};
 use crate::tensor::from_storage;
+#[cfg(feature = "wgpu")]
+use crate::WgpuStorage;
 use crate::{CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Tensor};
 use std::sync::Arc;
 
@@ -30,6 +32,14 @@ pub trait CustomOp1 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(&self, _storage: &WgpuStorage, _layout: &Layout) -> Result<(WgpuStorage, Shape)> {
+        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
+            "no wgpu implementation for {}",
+            self.name()
+        ))))
     }
 
     /// This function takes as argument the argument `arg` used in the forward pass, the result
@@ -79,6 +89,20 @@ pub trait CustomOp2 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        _: &WgpuStorage,
+        _: &Layout,
+        _: &WgpuStorage,
+        _: &Layout,
+    ) -> Result<(WgpuStorage, Shape)> {
+        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
+            "no wgpu implementation for {}",
+            self.name()
+        ))))
     }
 
     fn bwd(
@@ -137,6 +161,22 @@ pub trait CustomOp3 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        _: &WgpuStorage,
+        _: &Layout,
+        _: &WgpuStorage,
+        _: &Layout,
+        _: &WgpuStorage,
+        _: &Layout,
+    ) -> Result<(WgpuStorage, Shape)> {
+        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
+            "no wgpu implementation for {}",
+            self.name()
+        ))))
     }
 
     fn bwd(
@@ -270,6 +310,14 @@ pub trait InplaceOp1 {
             format!("no metal implementation for {}", self.name()).into(),
         ))
     }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(&self, _storage: &mut WgpuStorage, _layout: &Layout) -> Result<()> {
+        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
+            "no wgpu implementation for {}",
+            self.name()
+        ))))
+    }
 }
 
 pub trait InplaceOp2 {
@@ -300,6 +348,14 @@ pub trait InplaceOp2 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(&self, _: &mut WgpuStorage, _: &Layout, _: &WgpuStorage, _: &Layout) -> Result<()> {
+        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
+            "no wgpu implementation for {}",
+            self.name()
+        ))))
     }
 }
 
@@ -348,6 +404,22 @@ pub trait InplaceOp3 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn wgpu_fwd(
+        &self,
+        _: &mut WgpuStorage,
+        _: &Layout,
+        _: &WgpuStorage,
+        _: &Layout,
+        _: &WgpuStorage,
+        _: &Layout,
+    ) -> Result<()> {
+        Err(crate::Error::Wgpu(crate::WgpuError::Message(format!(
+            "no wgpu implementation for {}",
+            self.name()
+        ))))
     }
 }
 

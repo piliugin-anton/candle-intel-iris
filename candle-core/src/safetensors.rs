@@ -274,6 +274,12 @@ impl Tensor {
                     Device::Metal(_) => {
                         return Err(Error::Msg("Metal support not compiled".to_string()));
                     }
+                    #[cfg(feature = "wgpu")]
+                    Device::Wgpu(_) => {
+                        return Err(Error::Msg(
+                            "wgpu safetensors load not yet implemented".to_string(),
+                        ));
+                    }
                 };
 
                 let op = BackpropOp::none();
@@ -369,6 +375,12 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
         #[cfg(not(feature = "metal"))]
         Device::Metal(_) => {
             return Err(Error::Msg("Metal support not compiled".to_string()));
+        }
+        #[cfg(feature = "wgpu")]
+        Device::Wgpu(_) => {
+            return Err(Error::Msg(
+                "wgpu safetensors load not yet implemented".to_string(),
+            ));
         }
     };
 

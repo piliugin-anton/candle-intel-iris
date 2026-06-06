@@ -1,6 +1,8 @@
 //! Candle-specific Error and Result
 use std::{convert::Infallible, fmt::Display};
 
+#[cfg(feature = "wgpu")]
+use crate::WgpuError;
 use crate::{DType, DeviceLocation, Layout, MetalError, Shape};
 
 #[derive(Debug, Clone)]
@@ -173,6 +175,10 @@ pub enum Error {
 
     #[error("Metal error {0}")]
     Metal(#[from] MetalError),
+
+    #[cfg(feature = "wgpu")]
+    #[error("Wgpu error: {0}")]
+    Wgpu(#[from] WgpuError),
 
     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios"), feature = "ug"))]
     #[error(transparent)]

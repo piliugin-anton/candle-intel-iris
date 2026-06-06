@@ -87,6 +87,10 @@ mod tensor_cat;
 pub mod test_utils;
 pub mod utils;
 mod variable;
+#[cfg(feature = "wgpu")]
+pub mod wgpu_device;
+#[cfg(feature = "wgpu")]
+pub mod wgsl;
 
 #[cfg(feature = "cudnn")]
 pub use cuda_backend::cudnn;
@@ -118,6 +122,16 @@ pub use cuda::{CudaDevice, CudaStorage};
 
 #[cfg(feature = "metal")]
 pub use metal_backend::{MetalDevice, MetalError, MetalStorage};
+
+#[cfg(feature = "wgpu")]
+pub use wgpu_device::{
+    buffer_offset, detect_generation, inject_workgroup_size, is_intel_adapter, tune_shader_source,
+    Allocator, BindGroupBuilder, BufferBacking, BufferOffset, IntelCaps, IntelGeneration,
+    KernelDispatchArgs, KernelUniforms, MappedBacking, ShaderCache, StandardBindGroupArgs,
+    StandardBindGroupLayout, TensorLayoutUniform, WgpuDevice, WgpuDeviceConfig, WgpuError,
+    WgpuKernel, WgpuStorage, DEFAULT_UMA_AUTO_MAP_THRESHOLD, INTEL_VENDOR_ID, MAPPED_READ_USAGE,
+    MAX_TENSOR_DIMS, STORAGE_BUFFER_USAGE,
+};
 
 #[cfg(not(feature = "metal"))]
 pub use dummy_metal_backend::{MetalDevice, MetalError, MetalStorage};
