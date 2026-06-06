@@ -16,7 +16,9 @@ use crate::wgsl::{
     DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0, DEQUANT_Q8_0, MATMUL_NAIVE, MATMUL_TILED,
     MATMUL_TILED_BF16, MATMUL_TILED_F16, MATMUL_TILED_VEC, MATMUL_VEC_WIDTH,
     QMATMUL_Q4_0, QMATMUL_Q4_K, QMATMUL_Q5_0, QMATMUL_Q8_0, QUANT_Q4_0, QUANT_Q5_0, QUANT_Q8_0,
-    REDUCE, REDUCE_BF16, REDUCE_F16, RMS_NORM, ROPE, SDPA_FULL, SDPA_VECTOR, SOFTMAX, UNARY,
+    REDUCE, REDUCE_BF16, REDUCE_F16, RMS_NORM, RMS_NORM_BF16, RMS_NORM_F16, ROPE, ROPE_BF16,
+    ROPE_F16, SDPA_FULL, SDPA_FULL_BF16, SDPA_FULL_F16, SDPA_VECTOR, SDPA_VECTOR_BF16,
+    SDPA_VECTOR_F16, SOFTMAX, SOFTMAX_BF16, SOFTMAX_F16, UNARY,
     UNARY_BF16, UNARY_F16, WHERE_COND,
 };
 use crate::{CpuStorage, DType, Error, Layout, Result as CandleResult, Shape};
@@ -1552,22 +1554,61 @@ pub fn dispatch_copy2d(
     Ok(())
 }
 
-pub fn dispatch_rms_norm_f32(
+fn rms_norm_shader(dtype: DType) -> (&'static str, &'static str) {
+    match dtype {
+        DType::F16 => (RMS_NORM_F16, "rms_norm_f16"),
+        DType::BF16 => (RMS_NORM_BF16, "rms_norm_bf16"),
+        _ => (RMS_NORM, "rms_norm_f32"),
+    }
+}
+
+fn rope_shader(dtype: DType) -> (&'static str, &'static str) {
+    match dtype {
+        DType::F16 => (ROPE_F16, "rope_f16"),
+        DType::BF16 => (ROPE_BF16, "rope_bf16"),
+        _ => (ROPE, "rope_f32"),
+    }
+}
+
+fn sdpa_vector_shader(dtype: DType) -> (&'static str, &'static str) {
+    match dtype {
+        DType::F16 => (SDPA_VECTOR_F16, "sdpa_vector_f16"),
+        DType::BF16 => (SDPA_VECTOR_BF16, "sdpa_vector_bf16"),
+        _ => (SDPA_VECTOR, "sdpa_vector_f32"),
+    }
+}
+
+fn sdpa_full_shader(dtype: DType) -> (&'static str, &'static str) {
+    match dtype {
+        DType::F16 => (SDPA_FULL_F16, "sdpa_full_f16"),
+        DType::BF16 => (SDPA_FULL_BF16, "sdpa_full_bf16"),
+        _ => (SDPA_FULL, "sdpa_full_f32"),
+    }
+}
+
+/// RMS normalization with dtype-native kernels (f32 / f16 / bf16).
+pub fn dispatch_rms_norm(
     x: &WgpuStorage,
     alpha: &WgpuStorage,
     x_layout: &Layout,
     alpha_layout: &Layout,
     eps: f32,
 ) -> CandleResult<WgpuStorage> {
-    require_f32(x.dtype(), "rms_norm")?;
-    require_f32(alpha.dtype(), "rms_norm")?;
+    let dtype = x.dtype();
+    require_float(dtype, "rms_norm")?;
+    if alpha.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "rms_norm alpha dtype {:?} must match x dtype {dtype:?}",
+            alpha.dtype()
+        )));
+    }
     let device = x.device();
     let dims = x_layout.dims();
     let n_cols = *dims
         .last()
         .ok_or_else(|| Error::Msg("empty tensor in rms_norm".into()))?;
     let n_rows = x_layout.shape().elem_count() / n_cols;
-    let out = WgpuStorage::alloc(device, x_layout.shape(), DType::F32).map_err(Error::from)?;
+    let out = WgpuStorage::alloc(device, x_layout.shape(), dtype).map_err(Error::from)?;
     let out_layout = Layout::contiguous(x_layout.shape());
     let uniforms = RmsNormUniforms {
         n_rows: n_rows as u32,
@@ -1575,8 +1616,9 @@ pub fn dispatch_rms_norm_f32(
         eps_bits: eps.to_bits(),
         _pad: [0; 69],
     };
-    let kernel = WgpuKernel::compile_with_workgroup_size(device, RMS_NORM, "rms_norm_f32", 32)
-        .map_err(Error::from)?;
+    let (shader, entry) = rms_norm_shader(dtype);
+    let kernel =
+        WgpuKernel::compile_with_workgroup_size(device, shader, entry, 32).map_err(Error::from)?;
     let bind_group = BindGroupBuilder::new()
         .create_bind_group_bytes(
             device.device(),
@@ -1593,7 +1635,19 @@ pub fn dispatch_rms_norm_f32(
     Ok(out)
 }
 
-pub fn dispatch_rope_f32(
+/// RMS normalization (f32). Prefer [`dispatch_rms_norm`] for dtype-aware dispatch.
+pub fn dispatch_rms_norm_f32(
+    x: &WgpuStorage,
+    alpha: &WgpuStorage,
+    x_layout: &Layout,
+    alpha_layout: &Layout,
+    eps: f32,
+) -> CandleResult<WgpuStorage> {
+    dispatch_rms_norm(x, alpha, x_layout, alpha_layout, eps)
+}
+
+/// NeoX-style rotary positional embedding with dtype-native kernels.
+pub fn dispatch_rope(
     src: &WgpuStorage,
     cos: &WgpuStorage,
     sin: &WgpuStorage,
@@ -1601,12 +1655,17 @@ pub fn dispatch_rope_f32(
     cos_layout: &Layout,
     sin_layout: &Layout,
 ) -> CandleResult<WgpuStorage> {
-    require_f32(src.dtype(), "rope")?;
-    require_f32(cos.dtype(), "rope")?;
-    require_f32(sin.dtype(), "rope")?;
+    let dtype = src.dtype();
+    require_float(dtype, "rope")?;
+    if cos.dtype() != dtype || sin.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "rope cos/sin dtype must match src {dtype:?}, got cos={:?} sin={:?}",
+            cos.dtype(),
+            sin.dtype()
+        )));
+    }
     let (b, h, t, d) = src_layout.shape().dims4()?;
-    let out = WgpuStorage::alloc(src.device(), src_layout.shape(), DType::F32)
-        .map_err(Error::from)?;
+    let out = WgpuStorage::alloc(src.device(), src_layout.shape(), dtype).map_err(Error::from)?;
     let out_layout = Layout::contiguous(src_layout.shape());
     let unbatched_cs = cos_layout.dims().len() == 3 && sin_layout.dims().len() == 3;
     let uniforms = RopeUniforms {
@@ -1618,8 +1677,9 @@ pub fn dispatch_rope_f32(
         _pad: [0; 67],
     };
     let device = src.device();
+    let (shader, entry) = rope_shader(dtype);
     let kernel =
-        WgpuKernel::compile_extended(device, ROPE, "rope_f32", 32).map_err(Error::from)?;
+        WgpuKernel::compile_extended(device, shader, entry, 32).map_err(Error::from)?;
     let bind_group = kernel
         .create_extended_bind_group(
             device,
@@ -1635,6 +1695,18 @@ pub fn dispatch_rope_f32(
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
         .map_err(Error::from)?;
     Ok(out)
+}
+
+/// Rotary positional embedding (f32). Prefer [`dispatch_rope`] for dtype-aware dispatch.
+pub fn dispatch_rope_f32(
+    src: &WgpuStorage,
+    cos: &WgpuStorage,
+    sin: &WgpuStorage,
+    src_layout: &Layout,
+    cos_layout: &Layout,
+    sin_layout: &Layout,
+) -> CandleResult<WgpuStorage> {
+    dispatch_rope(src, cos, sin, src_layout, cos_layout, sin_layout)
 }
 
 pub fn dispatch_where_u8_f32(
@@ -1680,12 +1752,21 @@ pub fn dispatch_where_u8_f32(
     Ok(out)
 }
 
-/// Fused softmax along the last dimension (contiguous f32 input).
-pub fn dispatch_softmax_last_dim_f32(
+fn softmax_shader(dtype: DType) -> (&'static str, &'static str) {
+    match dtype {
+        DType::F16 => (SOFTMAX_F16, "softmax_last_dim_f16"),
+        DType::BF16 => (SOFTMAX_BF16, "softmax_last_dim_bf16"),
+        _ => (SOFTMAX, "softmax_last_dim_f32"),
+    }
+}
+
+/// Fused softmax along the last dimension (contiguous f32 / f16 / bf16 input).
+pub fn dispatch_softmax_last_dim(
     storage: &WgpuStorage,
     layout: &Layout,
 ) -> CandleResult<WgpuStorage> {
-    require_f32(storage.dtype(), "softmax")?;
+    let dtype = storage.dtype();
+    require_float(dtype, "softmax")?;
     if !layout.is_contiguous() {
         return Err(Error::Msg("softmax requires contiguous input".into()));
     }
@@ -1695,17 +1776,17 @@ pub fn dispatch_softmax_last_dim_f32(
         .ok_or_else(|| Error::Msg("empty tensor in softmax".into()))?;
     let n_rows = layout.shape().elem_count() / last_dim;
     let device = storage.device();
-    let out = WgpuStorage::alloc(device, layout.shape(), DType::F32).map_err(Error::from)?;
+    let out = WgpuStorage::alloc(device, layout.shape(), dtype).map_err(Error::from)?;
     let out_layout = Layout::contiguous(layout.shape());
     let uniforms = SoftmaxUniforms {
         n_rows: n_rows as u32,
         last_dim: last_dim as u32,
         _pad: [0; 70],
     };
-    let tuned = super::intel_caps::tune_shader_source(SOFTMAX, device.caps());
+    let (shader, entry) = softmax_shader(dtype);
+    let tuned = super::intel_caps::tune_shader_source(shader, device.caps());
     let kernel =
-        WgpuKernel::compile_with_workgroup_size(device, &tuned, "softmax_last_dim_f32", 32)
-            .map_err(Error::from)?;
+        WgpuKernel::compile_with_workgroup_size(device, &tuned, entry, 32).map_err(Error::from)?;
     let in0 = buffer_offset(storage, layout);
     let bind_group = BindGroupBuilder::new()
         .create_bind_group_bytes(
@@ -1722,6 +1803,14 @@ pub fn dispatch_softmax_last_dim_f32(
         .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [n_rows as u32, 1, 1]))
         .map_err(Error::from)?;
     Ok(out)
+}
+
+/// Fused softmax along the last dimension (f32). Prefer [`dispatch_softmax_last_dim`].
+pub fn dispatch_softmax_last_dim_f32(
+    storage: &WgpuStorage,
+    layout: &Layout,
+) -> CandleResult<WgpuStorage> {
+    dispatch_softmax_last_dim(storage, layout)
 }
 
 fn sdpa_dummy_mask_buffer(device: &WgpuDevice) -> Result<Arc<wgpu::Buffer>> {
@@ -1762,6 +1851,70 @@ fn validate_sdpa_shapes(
     Ok((bs, n_q_heads, n_kv_heads, q_seq, k_seq, head_dim, v_dim))
 }
 
+fn require_matching_sdpa_dtype(q: DType, k: DType, v: DType) -> CandleResult<DType> {
+    require_float(q, "sdpa")?;
+    if k != q || v != q {
+        return Err(Error::Msg(format!(
+            "sdpa q/k/v dtypes must match, got q={q:?} k={k:?} v={v:?}"
+        )));
+    }
+    Ok(q)
+}
+
+/// Fused scaled dot-product attention with vector/full routing (f32 / f16 / bf16).
+pub fn dispatch_sdpa(
+    q: &WgpuStorage,
+    k: &WgpuStorage,
+    v: &WgpuStorage,
+    q_layout: &Layout,
+    k_layout: &Layout,
+    v_layout: &Layout,
+    mask: Option<(&WgpuStorage, &Layout)>,
+    do_causal: bool,
+    scale: f32,
+    softcapping: f32,
+) -> CandleResult<WgpuStorage> {
+    let dtype = require_matching_sdpa_dtype(q.dtype(), k.dtype(), v.dtype())?;
+
+    let (bs, n_q_heads, _n_kv_heads, q_seq, k_seq, _head_dim, _v_dim) =
+        validate_sdpa_shapes(q_layout, k_layout, v_layout)?;
+
+    if q_seq > k_seq {
+        return Err(Error::Msg("sdpa requires q_seq <= k_seq".into()));
+    }
+
+    let use_vector = q_seq <= 8 && mask.is_none() && !do_causal;
+    if use_vector {
+        return dispatch_sdpa_vector(q, k, v, q_layout, k_layout, v_layout, scale, softcapping);
+    }
+
+    if softcapping != 1.0 {
+        return Err(Error::Msg(
+            "wgpu sdpa_full does not support softcapping (must be 1.0)".into(),
+        ));
+    }
+
+    if let Some((mask_storage, mask_layout)) = mask {
+        if mask_storage.dtype() != dtype {
+            return Err(Error::Msg(format!(
+                "sdpa mask dtype {:?} must match q dtype {dtype:?}",
+                mask_storage.dtype()
+            )));
+        }
+        if !mask_layout.is_contiguous() {
+            return Err(Error::Msg("sdpa mask must be contiguous".into()));
+        }
+        let mask_dims = mask_layout.shape().dims4()?;
+        if mask_dims != (bs, n_q_heads, q_seq, k_seq) {
+            return Err(Error::Msg(format!(
+                "sdpa mask shape must be ({bs}, {n_q_heads}, {q_seq}, {k_seq}), got {mask_dims:?}"
+            )));
+        }
+    }
+
+    dispatch_sdpa_full(q, k, v, q_layout, k_layout, v_layout, mask, do_causal, scale)
+}
+
 /// Fused scaled dot-product attention with vector/full routing (f32).
 pub fn dispatch_sdpa_f32(
     q: &WgpuStorage,
@@ -1775,43 +1928,7 @@ pub fn dispatch_sdpa_f32(
     scale: f32,
     softcapping: f32,
 ) -> CandleResult<WgpuStorage> {
-    require_f32(q.dtype(), "sdpa")?;
-    require_f32(k.dtype(), "sdpa")?;
-    require_f32(v.dtype(), "sdpa")?;
-
-    let (bs, _n_q_heads, _n_kv_heads, q_seq, k_seq, _head_dim, _v_dim) =
-        validate_sdpa_shapes(q_layout, k_layout, v_layout)?;
-
-    if q_seq > k_seq {
-        return Err(Error::Msg("sdpa requires q_seq <= k_seq".into()));
-    }
-
-    let use_vector = q_seq <= 8 && mask.is_none() && !do_causal;
-    if use_vector {
-        return dispatch_sdpa_vector_f32(q, k, v, q_layout, k_layout, v_layout, scale, softcapping);
-    }
-
-    if softcapping != 1.0 {
-        return Err(Error::Msg(
-            "wgpu sdpa_full does not support softcapping (must be 1.0)".into(),
-        ));
-    }
-
-    if let Some((mask_storage, mask_layout)) = mask {
-        require_f32(mask_storage.dtype(), "sdpa mask")?;
-        if !mask_layout.is_contiguous() {
-            return Err(Error::Msg("sdpa mask must be contiguous".into()));
-        }
-        let mask_dims = mask_layout.shape().dims4()?;
-        if mask_dims != (bs, _n_q_heads, q_seq, k_seq) {
-            return Err(Error::Msg(format!(
-                "sdpa mask shape must be ({bs}, {}, {q_seq}, {k_seq}), got {mask_dims:?}",
-                _n_q_heads
-            )));
-        }
-    }
-
-    dispatch_sdpa_full_f32(
+    dispatch_sdpa(
         q,
         k,
         v,
@@ -1821,11 +1938,12 @@ pub fn dispatch_sdpa_f32(
         mask,
         do_causal,
         scale,
+        softcapping,
     )
 }
 
-/// Fused scaled dot-product attention (prefill/full path, f32).
-pub fn dispatch_sdpa_full_f32(
+/// Fused scaled dot-product attention (prefill/full path).
+pub fn dispatch_sdpa_full(
     q: &WgpuStorage,
     k: &WgpuStorage,
     v: &WgpuStorage,
@@ -1836,12 +1954,13 @@ pub fn dispatch_sdpa_full_f32(
     do_causal: bool,
     scale: f32,
 ) -> CandleResult<WgpuStorage> {
+    let dtype = require_matching_sdpa_dtype(q.dtype(), k.dtype(), v.dtype())?;
     let (bs, n_q_heads, n_kv_heads, q_seq, k_seq, head_dim, v_dim) =
         validate_sdpa_shapes(q_layout, k_layout, v_layout)?;
 
     let out_shape = Shape::from((bs, n_q_heads, q_seq, v_dim));
     let device = q.device();
-    let out = WgpuStorage::alloc(device, &out_shape, DType::F32).map_err(Error::from)?;
+    let out = WgpuStorage::alloc(device, &out_shape, dtype).map_err(Error::from)?;
     let out_layout = Layout::contiguous(&out_shape);
     let gqa_factor = n_q_heads / n_kv_heads;
     let has_mask = u32::from(mask.is_some());
@@ -1877,8 +1996,8 @@ pub fn dispatch_sdpa_full_f32(
         }
     };
 
-    let kernel =
-        WgpuKernel::compile_sdpa(device, SDPA_FULL, "sdpa_full_f32", 1).map_err(Error::from)?;
+    let (shader, entry) = sdpa_full_shader(dtype);
+    let kernel = WgpuKernel::compile_sdpa(device, shader, entry, 1).map_err(Error::from)?;
     let bind_group = kernel
         .create_sdpa_bind_group(
             device,
@@ -1887,6 +2006,82 @@ pub fn dispatch_sdpa_full_f32(
             buffer_offset(k, k_layout),
             buffer_offset(v, v_layout),
             mask_binding,
+            uniforms.as_bytes(),
+        )
+        .map_err(Error::from)?;
+    let grid = (bs * n_q_heads * q_seq) as u32;
+    q.backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
+        .map_err(Error::from)?;
+    Ok(out)
+}
+
+/// Fused scaled dot-product attention (prefill/full path, f32).
+pub fn dispatch_sdpa_full_f32(
+    q: &WgpuStorage,
+    k: &WgpuStorage,
+    v: &WgpuStorage,
+    q_layout: &Layout,
+    k_layout: &Layout,
+    v_layout: &Layout,
+    mask: Option<(&WgpuStorage, &Layout)>,
+    do_causal: bool,
+    scale: f32,
+) -> CandleResult<WgpuStorage> {
+    dispatch_sdpa_full(q, k, v, q_layout, k_layout, v_layout, mask, do_causal, scale)
+}
+
+/// Fused scaled dot-product attention (vector/decode path).
+pub fn dispatch_sdpa_vector(
+    q: &WgpuStorage,
+    k: &WgpuStorage,
+    v: &WgpuStorage,
+    q_layout: &Layout,
+    k_layout: &Layout,
+    v_layout: &Layout,
+    scale: f32,
+    softcapping: f32,
+) -> CandleResult<WgpuStorage> {
+    let dtype = require_matching_sdpa_dtype(q.dtype(), k.dtype(), v.dtype())?;
+    let (bs, n_q_heads, n_kv_heads, q_seq, k_seq, head_dim, v_dim) =
+        validate_sdpa_shapes(q_layout, k_layout, v_layout)?;
+    if q_seq > 8 {
+        return Err(Error::Msg(format!(
+            "sdpa_vector supports q_seq <= 8, got {q_seq}"
+        )));
+    }
+
+    let out_shape = Shape::from((bs, n_q_heads, q_seq, v_dim));
+    let device = q.device();
+    let out = WgpuStorage::alloc(device, &out_shape, dtype).map_err(Error::from)?;
+    let out_layout = Layout::contiguous(&out_shape);
+    let gqa_factor = n_q_heads / n_kv_heads;
+    let uniforms = SdpaUniforms {
+        bs: bs as u32,
+        n_q_heads: n_q_heads as u32,
+        n_kv_heads: n_kv_heads as u32,
+        q_seq: q_seq as u32,
+        k_seq: k_seq as u32,
+        head_dim: head_dim as u32,
+        v_dim: v_dim as u32,
+        gqa_factor: gqa_factor as u32,
+        scale_bits: scale.to_bits(),
+        softcapping_bits: softcapping.to_bits(),
+        has_mask: 0,
+        do_causal: 0,
+        ql_off: 0,
+        _pad: [0; 59],
+    };
+    let (shader, entry) = sdpa_vector_shader(dtype);
+    let kernel =
+        WgpuKernel::compile_extended(device, shader, entry, 1).map_err(Error::from)?;
+    let bind_group = kernel
+        .create_extended_bind_group(
+            device,
+            buffer_offset(&out, &out_layout),
+            buffer_offset(q, q_layout),
+            buffer_offset(k, k_layout),
+            buffer_offset(v, v_layout),
             uniforms.as_bytes(),
         )
         .map_err(Error::from)?;
@@ -1908,52 +2103,7 @@ pub fn dispatch_sdpa_vector_f32(
     scale: f32,
     softcapping: f32,
 ) -> CandleResult<WgpuStorage> {
-    let (bs, n_q_heads, n_kv_heads, q_seq, k_seq, head_dim, v_dim) =
-        validate_sdpa_shapes(q_layout, k_layout, v_layout)?;
-    if q_seq > 8 {
-        return Err(Error::Msg(format!(
-            "sdpa_vector supports q_seq <= 8, got {q_seq}"
-        )));
-    }
-
-    let out_shape = Shape::from((bs, n_q_heads, q_seq, v_dim));
-    let device = q.device();
-    let out = WgpuStorage::alloc(device, &out_shape, DType::F32).map_err(Error::from)?;
-    let out_layout = Layout::contiguous(&out_shape);
-    let gqa_factor = n_q_heads / n_kv_heads;
-    let uniforms = SdpaUniforms {
-        bs: bs as u32,
-        n_q_heads: n_q_heads as u32,
-        n_kv_heads: n_kv_heads as u32,
-        q_seq: q_seq as u32,
-        k_seq: k_seq as u32,
-        head_dim: head_dim as u32,
-        v_dim: v_dim as u32,
-        gqa_factor: gqa_factor as u32,
-        scale_bits: scale.to_bits(),
-        softcapping_bits: softcapping.to_bits(),
-        has_mask: 0,
-        do_causal: 0,
-        ql_off: 0,
-        _pad: [0; 59],
-    };
-    let kernel =
-        WgpuKernel::compile_extended(device, SDPA_VECTOR, "sdpa_vector_f32", 1).map_err(Error::from)?;
-    let bind_group = kernel
-        .create_extended_bind_group(
-            device,
-            buffer_offset(&out, &out_layout),
-            buffer_offset(q, q_layout),
-            buffer_offset(k, k_layout),
-            buffer_offset(v, v_layout),
-            uniforms.as_bytes(),
-        )
-        .map_err(Error::from)?;
-    let grid = (bs * n_q_heads * q_seq) as u32;
-    q.backing()
-        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
-        .map_err(Error::from)?;
-    Ok(out)
+    dispatch_sdpa_vector(q, k, v, q_layout, k_layout, v_layout, scale, softcapping)
 }
 
 #[cfg(test)]
@@ -2072,8 +2222,15 @@ mod tests {
         compile_qmatmul_kernel(&device, QMATMUL_Q4_K, "qmatmul_q4_k_f32").unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, SOFTMAX, "softmax_last_dim_f32", 32)
             .unwrap();
+        WgpuKernel::compile_with_workgroup_size(&device, SOFTMAX_BF16, "softmax_last_dim_bf16", 32)
+            .unwrap();
         WgpuKernel::compile_extended(&device, SDPA_VECTOR, "sdpa_vector_f32", 1).unwrap();
+        WgpuKernel::compile_extended(&device, SDPA_VECTOR_BF16, "sdpa_vector_bf16", 1).unwrap();
         WgpuKernel::compile_sdpa(&device, SDPA_FULL, "sdpa_full_f32", 1).unwrap();
+        WgpuKernel::compile_sdpa(&device, SDPA_FULL_BF16, "sdpa_full_bf16", 1).unwrap();
+        WgpuKernel::compile_with_workgroup_size(&device, RMS_NORM_BF16, "rms_norm_bf16", 32)
+            .unwrap();
+        WgpuKernel::compile_extended(&device, ROPE_BF16, "rope_bf16", 32).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, QMATMUL_Q5_0, "qmatmul_q5_0_f32", 8)
             .unwrap();
         compile_matmul_kernel(&device, MatMulKernel::TiledBf16).unwrap();

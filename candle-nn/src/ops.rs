@@ -434,7 +434,7 @@ impl candle::CustomOp1 for SoftmaxLastDim {
         if !(layout.is_contiguous() && layout.stride()[layout.shape().rank() - 1] == 1) {
             candle::bail!("Non contiguous softmax-last-dim is not implemented");
         }
-        let out = candle::wgpu_device::dispatch_softmax_last_dim_f32(storage, layout)?;
+        let out = candle::wgpu_device::dispatch_softmax_last_dim(storage, layout)?;
         Ok((out, layout.shape().clone()))
     }
 }
@@ -596,7 +596,7 @@ impl candle::CustomOp2 for RmsNorm {
         if !(l1.is_contiguous() && l2.is_contiguous()) {
             candle::bail!("Non contiguous rmsnorm is not implemented");
         }
-        let out = candle::wgpu_device::dispatch_rms_norm_f32(s1, s2, l1, l2, self.eps)?;
+        let out = candle::wgpu_device::dispatch_rms_norm(s1, s2, l1, l2, self.eps)?;
         Ok((out, l1.shape().clone()))
     }
 
@@ -1267,10 +1267,6 @@ impl candle::CustomOp3 for Sdpa {
         v: &candle::WgpuStorage,
         v_l: &Layout,
     ) -> Result<(candle::WgpuStorage, Shape)> {
-        if q.dtype() != DType::F32 || k.dtype() != DType::F32 || v.dtype() != DType::F32 {
-            candle::bail!("wgpu sdpa only supports f32 q, k, v");
-        }
-
         let q_head = q_l.dim(D::Minus1)?;
         let q_seq = q_l.dim(2)?;
         let k_seq = k_l.dim(2)?;
@@ -1299,10 +1295,7 @@ impl candle::CustomOp3 for Sdpa {
             let candle::Storage::Wgpu(mask_storage) = &*mask_s else {
                 candle::bail!("wgpu sdpa mask must be on wgpu device");
             };
-            if mask_tensor.dtype() != DType::F32 {
-                candle::bail!("wgpu sdpa mask must be f32");
-            }
-            candle::wgpu_device::dispatch_sdpa_f32(
+            candle::wgpu_device::dispatch_sdpa(
                 q,
                 k,
                 v,
@@ -1315,7 +1308,7 @@ impl candle::CustomOp3 for Sdpa {
                 self.softcapping,
             )?
         } else {
-            candle::wgpu_device::dispatch_sdpa_f32(
+            candle::wgpu_device::dispatch_sdpa(
                 q,
                 k,
                 v,

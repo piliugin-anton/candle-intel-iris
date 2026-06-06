@@ -81,8 +81,14 @@ pub const QMATMUL_Q4_K: &str = concat!(
     include_str!("../wgsl/qmatmul_q4_k.wgsl")
 );
 pub const SOFTMAX: &str = include_str!("../wgsl/softmax.wgsl");
+pub const SOFTMAX_F16: &str = include_str!("../wgsl/softmax_f16.wgsl");
+pub const SOFTMAX_BF16: &str = include_str!("../wgsl/softmax_bf16.wgsl");
 pub const SDPA_VECTOR: &str = include_str!("../wgsl/sdpa_vector.wgsl");
+pub const SDPA_VECTOR_F16: &str = include_str!("../wgsl/sdpa_vector_f16.wgsl");
+pub const SDPA_VECTOR_BF16: &str = include_str!("../wgsl/sdpa_vector_bf16.wgsl");
 pub const SDPA_FULL: &str = include_str!("../wgsl/sdpa_full.wgsl");
+pub const SDPA_FULL_F16: &str = include_str!("../wgsl/sdpa_full_f16.wgsl");
+pub const SDPA_FULL_BF16: &str = include_str!("../wgsl/sdpa_full_bf16.wgsl");
 pub const UNARY_BF16: &str = concat!(
     include_str!("../wgsl/common_bf16.wgsl"),
     include_str!("../wgsl/unary_bf16.wgsl")
@@ -141,7 +147,11 @@ pub const COPY2D: &str = include_str!("../wgsl/copy2d.wgsl");
 pub const COPY2D_F16: &str = include_str!("../wgsl/copy2d_f16.wgsl");
 pub const COPY2D_BF16: &str = include_str!("../wgsl/copy2d_bf16.wgsl");
 pub const RMS_NORM: &str = include_str!("../wgsl/rms_norm.wgsl");
+pub const RMS_NORM_F16: &str = include_str!("../wgsl/rms_norm_f16.wgsl");
+pub const RMS_NORM_BF16: &str = include_str!("../wgsl/rms_norm_bf16.wgsl");
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
+pub const ROPE_F16: &str = include_str!("../wgsl/rope_f16.wgsl");
+pub const ROPE_BF16: &str = include_str!("../wgsl/rope_bf16.wgsl");
 pub const WHERE_COND: &str = include_str!("../wgsl/where_cond.wgsl");
 pub const IM2COL2D: &str = include_str!("../wgsl/im2col2d.wgsl");
 pub const IM2COL2D_F16: &str = include_str!("../wgsl/im2col2d_f16.wgsl");
@@ -214,8 +224,18 @@ mod tests {
         assert!(QMATMUL_Q8_0.contains("fn qmatmul_q8_0_f32"));
         assert!(QMATMUL_Q4_K.contains("fn qmatmul_q4_k_f32"));
         assert!(SOFTMAX.contains("fn softmax_last_dim_f32"));
+        assert!(SOFTMAX_F16.contains("fn softmax_last_dim_f16"));
+        assert!(SOFTMAX_BF16.contains("fn softmax_last_dim_bf16"));
         assert!(SDPA_VECTOR.contains("fn sdpa_vector_f32"));
+        assert!(SDPA_VECTOR_F16.contains("fn sdpa_vector_f16"));
+        assert!(SDPA_VECTOR_BF16.contains("fn sdpa_vector_bf16"));
         assert!(SDPA_FULL.contains("fn sdpa_full_f32"));
+        assert!(SDPA_FULL_F16.contains("fn sdpa_full_f16"));
+        assert!(SDPA_FULL_BF16.contains("fn sdpa_full_bf16"));
+        assert!(RMS_NORM_F16.contains("fn rms_norm_f16"));
+        assert!(RMS_NORM_BF16.contains("fn rms_norm_bf16"));
+        assert!(ROPE_F16.contains("fn rope_f16"));
+        assert!(ROPE_BF16.contains("fn rope_bf16"));
         assert!(MATMUL_TILED_BF16.contains("fn matmul_tiled_bf16"));
         assert!(UNARY_BF16.contains("fn gelu_bf16"));
         assert!(UNARY_BF16.contains("fn silu_bf16"));

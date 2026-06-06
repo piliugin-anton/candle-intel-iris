@@ -443,6 +443,81 @@ fn parity_qmatmul_llm_shape() -> Result<()> {
     Ok(())
 }
 
+fn assert_parity_tol(cpu: &Tensor, gpu: &Tensor, tol: f32) -> Result<()> {
+    let d = max_abs_diff(cpu, gpu)?;
+    assert!(d < tol, "max abs diff {d} >= {tol}");
+    Ok(())
+}
+
+/// CPU f32 reference for fused SDPA parity (q/k/v may be f16/bf16; compared in f32).
+fn sdpa_reference_f32(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f32,
+    causal_mask: Option<&Tensor>,
+) -> Result<Tensor> {
+    let qf = q.to_dtype(DType::F32)?;
+    let kf = k.to_dtype(DType::F32)?;
+    let vf = v.to_dtype(DType::F32)?;
+    let mut att = (qf * scale as f64)?.matmul(&kf.t()?)?;
+    if let Some(mask) = causal_mask {
+        att = att.broadcast_add(mask)?;
+    }
+    let att = candle_nn::ops::softmax_last_dim(&att)?;
+    att.matmul(&vf)
+}
+
+fn causal_mask_f32(q_seq: usize, k_seq: usize, device: &Device) -> Result<Tensor> {
+    let offset = k_seq - q_seq;
+    let mask: Vec<f32> = (0..q_seq)
+        .flat_map(|i| {
+            (0..k_seq).map(move |j| {
+                if j as isize <= i as isize + offset as isize {
+                    0.0
+                } else {
+                    f32::NEG_INFINITY
+                }
+            })
+        })
+        .collect();
+    Tensor::from_vec(mask, (1, 1, q_seq, k_seq), device)
+}
+
+fn assert_sdpa_low_precision_parity(
+    cpu: &Device,
+    gpu: &Device,
+    bs: usize,
+    heads: usize,
+    q_seq: usize,
+    k_seq: usize,
+    dk: usize,
+    dtype: DType,
+    do_causal: bool,
+    tol: f32,
+) -> Result<()> {
+    let scale = (dk as f32).sqrt().recip();
+    let q = Tensor::rand(-1.0f32, 1.0f32, (bs, heads, q_seq, dk), cpu)?.to_dtype(dtype)?;
+    let k = Tensor::rand(-1.0f32, 1.0f32, (bs, heads, k_seq, dk), cpu)?.to_dtype(dtype)?;
+    let v = Tensor::rand(-1.0f32, 1.0f32, (bs, heads, k_seq, dk), cpu)?.to_dtype(dtype)?;
+    let mask = if do_causal {
+        Some(causal_mask_f32(q_seq, k_seq, cpu)?)
+    } else {
+        None
+    };
+    let truth = sdpa_reference_f32(&q, &k, &v, scale, mask.as_ref())?;
+    let fused = candle_nn::ops::sdpa(
+        &q.to_device(gpu)?,
+        &k.to_device(gpu)?,
+        &v.to_device(gpu)?,
+        None,
+        do_causal,
+        scale,
+        1.,
+    )?;
+    assert_parity_tol(&truth, &fused.to_dtype(DType::F32)?, tol)
+}
+
 #[test]
 #[ignore = "requires GPU with wgpu backend"]
 fn parity_rms_norm_f32() -> Result<()> {
@@ -453,6 +528,32 @@ fn parity_rms_norm_f32() -> Result<()> {
     let cpu_out = candle_nn::ops::rms_norm(&xs, &alpha, 1e-5)?;
     let gpu_out = candle_nn::ops::rms_norm(&xs.to_device(&gpu)?, &alpha.to_device(&gpu)?, 1e-5)?;
     assert_parity(&cpu_out, &gpu_out)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_rms_norm_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs = Tensor::rand(-1.0f32, 1.0f32, (2, 4, 8), &cpu)?.to_dtype(DType::F16)?;
+    let alpha = Tensor::ones(8, DType::F16, &cpu)?;
+    let cpu_out = candle_nn::ops::rms_norm(&xs, &alpha, 1e-5)?;
+    let gpu_out = candle_nn::ops::rms_norm(&xs.to_device(&gpu)?, &alpha.to_device(&gpu)?, 1e-5)?;
+    assert_parity_tol(&cpu_out.to_dtype(DType::F32)?, &gpu_out.to_dtype(DType::F32)?, F16_EPS)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_rms_norm_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs = Tensor::rand(-1.0f32, 1.0f32, (2, 4, 8), &cpu)?.to_dtype(DType::BF16)?;
+    let alpha = Tensor::ones(8, DType::BF16, &cpu)?;
+    let cpu_out = candle_nn::ops::rms_norm(&xs, &alpha, 1e-5)?;
+    let gpu_out = candle_nn::ops::rms_norm(&xs.to_device(&gpu)?, &alpha.to_device(&gpu)?, 1e-5)?;
+    assert_parity_tol(&cpu_out.to_dtype(DType::F32)?, &gpu_out.to_dtype(DType::F32)?, BF16_EPS)?;
     Ok(())
 }
 
@@ -471,6 +572,42 @@ fn parity_rope_f32() -> Result<()> {
         &sin.to_device(&gpu)?,
     )?;
     assert_parity(&cpu_out, &gpu_out)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_rope_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs = Tensor::rand(-1.0f32, 1.0f32, (1, 2, 4, 8), &cpu)?.to_dtype(DType::F16)?;
+    let cos = Tensor::rand(-1.0f32, 1.0f32, (4, 4), &cpu)?.to_dtype(DType::F16)?;
+    let sin = Tensor::rand(-1.0f32, 1.0f32, (4, 4), &cpu)?.to_dtype(DType::F16)?;
+    let cpu_out = candle_nn::rotary_emb::rope(&xs, &cos, &sin)?;
+    let gpu_out = candle_nn::rotary_emb::rope(
+        &xs.to_device(&gpu)?,
+        &cos.to_device(&gpu)?,
+        &sin.to_device(&gpu)?,
+    )?;
+    assert_parity_tol(&cpu_out.to_dtype(DType::F32)?, &gpu_out.to_dtype(DType::F32)?, F16_EPS)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_rope_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs = Tensor::rand(-1.0f32, 1.0f32, (1, 2, 4, 8), &cpu)?.to_dtype(DType::BF16)?;
+    let cos = Tensor::rand(-1.0f32, 1.0f32, (4, 4), &cpu)?.to_dtype(DType::BF16)?;
+    let sin = Tensor::rand(-1.0f32, 1.0f32, (4, 4), &cpu)?.to_dtype(DType::BF16)?;
+    let cpu_out = candle_nn::rotary_emb::rope(&xs, &cos, &sin)?;
+    let gpu_out = candle_nn::rotary_emb::rope(
+        &xs.to_device(&gpu)?,
+        &cos.to_device(&gpu)?,
+        &sin.to_device(&gpu)?,
+    )?;
+    assert_parity_tol(&cpu_out.to_dtype(DType::F32)?, &gpu_out.to_dtype(DType::F32)?, BF16_EPS)?;
     Ok(())
 }
 
@@ -508,6 +645,40 @@ fn parity_softmax_last_dim_fused() -> Result<()> {
     let out_cpu = candle_nn::ops::softmax_last_dim(&xs_cpu)?;
     let out_gpu = candle_nn::ops::softmax_last_dim(&xs_gpu)?;
     assert_parity(&out_cpu, &out_gpu)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_softmax_last_dim_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs_cpu = Tensor::rand(-3.0f32, 3.0f32, (2, 16), &cpu)?.to_dtype(DType::F16)?;
+    let xs_gpu = xs_cpu.to_device(&gpu)?;
+    let out_cpu = candle_nn::ops::softmax_last_dim(&xs_cpu)?;
+    let out_gpu = candle_nn::ops::softmax_last_dim(&xs_gpu)?;
+    assert_parity_tol(
+        &out_cpu.to_dtype(DType::F32)?,
+        &out_gpu.to_dtype(DType::F32)?,
+        F16_EPS,
+    )?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_softmax_last_dim_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    let xs_cpu = Tensor::rand(-3.0f32, 3.0f32, (2, 16), &cpu)?.to_dtype(DType::BF16)?;
+    let xs_gpu = xs_cpu.to_device(&gpu)?;
+    let out_cpu = candle_nn::ops::softmax_last_dim(&xs_cpu)?;
+    let out_gpu = candle_nn::ops::softmax_last_dim(&xs_gpu)?;
+    assert_parity_tol(
+        &out_cpu.to_dtype(DType::F32)?,
+        &out_gpu.to_dtype(DType::F32)?,
+        BF16_EPS,
+    )?;
     Ok(())
 }
 
@@ -911,6 +1082,54 @@ fn parity_sdpa_causal_f32() -> Result<()> {
     let diff = max_abs_diff(&truth, &fused.to_device(&cpu)?)?;
     assert!(diff < 0.05, "sdpa causal max abs diff {diff}");
     Ok(())
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sdpa_vector_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    assert_sdpa_low_precision_parity(&cpu, &gpu, 2, 4, 1, 8, 64, DType::F16, false, 0.05)
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sdpa_vector_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    assert_sdpa_low_precision_parity(&cpu, &gpu, 2, 4, 1, 8, 64, DType::BF16, false, 0.08)
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sdpa_full_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    assert_sdpa_low_precision_parity(&cpu, &gpu, 2, 4, 16, 16, 64, DType::F16, false, 0.08)
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sdpa_full_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    assert_sdpa_low_precision_parity(&cpu, &gpu, 2, 4, 16, 16, 64, DType::BF16, false, 0.08)
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sdpa_causal_f16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    assert_sdpa_low_precision_parity(&cpu, &gpu, 2, 4, 8, 8, 64, DType::F16, true, 0.08)
+}
+
+#[test]
+#[ignore = "requires GPU with wgpu backend"]
+fn parity_sdpa_causal_bf16() -> Result<()> {
+    let gpu = wgpu_device()?;
+    let cpu = Device::Cpu;
+    assert_sdpa_low_precision_parity(&cpu, &gpu, 2, 4, 8, 8, 64, DType::BF16, true, 0.08)
 }
 
 #[test]

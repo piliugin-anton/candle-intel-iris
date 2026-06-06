@@ -303,7 +303,7 @@ impl RotaryEmb {
         if !(l1.is_contiguous() && l2.is_contiguous() && l3.is_contiguous()) {
             candle::bail!("Non contiguous rope is not implemented");
         }
-        let out = candle::wgpu_device::dispatch_rope_f32(s1, s2, s3, l1, l2, l3)?;
+        let out = candle::wgpu_device::dispatch_rope(s1, s2, s3, l1, l2, l3)?;
         Ok((out, l1.shape().clone()))
     }
 }
