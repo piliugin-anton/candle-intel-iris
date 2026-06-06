@@ -231,16 +231,17 @@ impl LayerWeights {
         };
         self.kv_cache = Some((k.clone(), v.clone()));
 
-        let y = if q.device().is_metal() && seq_len == 1 {
-            // SDPA will do MQA for us
-            candle_nn::ops::sdpa(
+        let y = if seq_len == 1
+            && crate::attention::uses_sdpa_device(q.device())
+            && crate::attention::fused_attention_available(q.device(), self.head_dim)
+        {
+            crate::attention::fused_attention(
                 &q,
                 &k,
                 &v,
-                None,
-                false,
                 1. / (self.head_dim as f32).sqrt(),
-                1.,
+                false,
+                None,
             )?
         } else {
             // Support for MQA, useful for 70B models and mistral.

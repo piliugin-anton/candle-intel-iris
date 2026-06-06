@@ -440,22 +440,6 @@ fn flash_compatible_attention(
     attn_scores.reshape(q_dims_for_matmul)?.transpose(1, 2)
 }
 
-#[cfg(feature = "flash-attn")]
-fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
-}
-
-#[cfg(not(feature = "flash-attn"))]
-fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
-    unimplemented!("compile with '--features flash-attn'")
-}
-
 fn joint_attn(
     context_qkv: &Qkv,
     x_qkv: &Qkv,
@@ -488,8 +472,17 @@ fn attn(qkv: &Qkv, num_heads: usize, use_flash_attn: bool) -> Result<Tensor> {
 
     let headdim = qkv.q.dim(D::Minus1)?;
     let softmax_scale = 1.0 / (headdim as f64).sqrt();
-    let attn = if use_flash_attn {
-        flash_attn(&qkv.q, &qkv.k, &qkv.v, softmax_scale as f32, false)?
+    let attn = if use_flash_attn
+        && crate::attention::fused_attention_available(qkv.q.device(), headdim)
+    {
+        crate::attention::fused_attention_bsnd(
+            &qkv.q,
+            &qkv.k,
+            &qkv.v,
+            softmax_scale as f32,
+            false,
+            None,
+        )?
     } else {
         flash_compatible_attention(&qkv.q, &qkv.k, &qkv.v, softmax_scale as f32)?
     };

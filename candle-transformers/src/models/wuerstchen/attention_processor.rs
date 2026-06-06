@@ -14,22 +14,6 @@ pub struct Attention {
     use_flash_attn: bool,
 }
 
-#[cfg(feature = "flash-attn")]
-fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
-}
-
-#[cfg(not(feature = "flash-attn"))]
-fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
-    unimplemented!("compile with '--features flash-attn'")
-}
-
 impl Attention {
     pub fn new(
         query_dim: usize,
@@ -88,22 +72,18 @@ impl Attention {
 
         let xs = if self.use_flash_attn {
             let init_dtype = query.dtype();
-            let q = query
-                .to_dtype(candle::DType::F16)?
-                .unsqueeze(0)?
-                .transpose(1, 2)?;
-            let k = key
-                .to_dtype(candle::DType::F16)?
-                .unsqueeze(0)?
-                .transpose(1, 2)?;
-            let v = value
-                .to_dtype(candle::DType::F16)?
-                .unsqueeze(0)?
-                .transpose(1, 2)?;
-            flash_attn(&q, &k, &v, self.scale as f32, false)?
-                .transpose(1, 2)?
-                .squeeze(0)?
-                .to_dtype(init_dtype)?
+            let q = query.to_dtype(candle::DType::F16)?.unsqueeze(0)?;
+            let k = key.to_dtype(candle::DType::F16)?.unsqueeze(0)?;
+            let v = value.to_dtype(candle::DType::F16)?.unsqueeze(0)?;
+            let head_dim = q.dim(candle::D::Minus1)?;
+            if crate::attention::fused_attention_available(q.device(), head_dim) {
+                crate::attention::fused_attention_bsnd(&q, &k, &v, self.scale as f32, false, None)?
+                    .squeeze(0)?
+                    .to_dtype(init_dtype)?
+            } else {
+                let attn_prs = self.get_attention_scores(&query, &key)?;
+                attn_prs.matmul(&value)?
+            }
         } else {
             let attn_prs = self.get_attention_scores(&query, &key)?;
             attn_prs.matmul(&value)?

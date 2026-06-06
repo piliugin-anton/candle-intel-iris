@@ -189,24 +189,6 @@ impl Module for MLP {
     }
 }
 
-// ── Flash attention ─────────────────────────────────────────────────────────
-
-#[cfg(feature = "flash-attn")]
-fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
-}
-
-#[cfg(not(feature = "flash-attn"))]
-fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
-    unimplemented!("compile with '--features flash-attn'")
-}
-
 // ── KvCache ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -352,12 +334,11 @@ impl Attention {
             attention_mask
         };
 
-        let attn_output = if self.use_flash_attn {
-            let q = q.transpose(1, 2)?;
-            let k = k.transpose(1, 2)?;
-            let v = v.transpose(1, 2)?;
+        let attn_output = if self.use_flash_attn
+            && crate::attention::fused_attention_available(q.device(), self.head_dim)
+        {
             let scale = 1f32 / (self.head_dim as f32).sqrt();
-            flash_attn(&q, &k, &v, scale, mask.is_some())?.transpose(1, 2)?
+            crate::attention::fused_attention(&q, &k, &v, scale, mask.is_some(), None)?
         } else {
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
             let attn_weights = (q.matmul(&k.transpose(2, 3)?)? * scale)?;

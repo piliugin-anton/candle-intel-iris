@@ -188,12 +188,12 @@ impl StreamingMultiheadAttention {
             (k.clone(), v.clone())
         };
 
-        let xs = if q.dtype() == DType::BF16 && self.use_flash_attn {
-            let q = q.transpose(1, 2)?;
-            let k = k.transpose(1, 2)?;
-            let v = v.transpose(1, 2)?;
+        let xs = if q.dtype() == DType::BF16
+            && self.use_flash_attn
+            && crate::attention::fused_attention_available(q.device(), head_dim)
+        {
             let softmax_scale = 1f32 / (head_dim as f32).sqrt();
-            flash_attn(&q, &k, &v, softmax_scale, t > 1)?.transpose(1, 2)?
+            crate::attention::fused_attention(&q, &k, &v, softmax_scale, t > 1, None)?
         } else {
             let pre_ws = q.matmul(&k.t()?)?; // b,h,t,k
             let pre_ws = (pre_ws * (head_dim as f64).powf(-0.5))?;
@@ -760,18 +760,3 @@ impl StreamingModule for ProjectedTransformer {
     }
 }
 
-#[cfg(feature = "flash-attn")]
-fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
-}
-
-#[cfg(not(feature = "flash-attn"))]
-fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
-    unimplemented!("compile with '--features flash-attn'")
-}

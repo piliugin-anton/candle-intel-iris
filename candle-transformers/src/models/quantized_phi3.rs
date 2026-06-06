@@ -144,15 +144,22 @@ impl LayerWeights {
         let k = crate::utils::repeat_kv(k, self.n_head / self.n_kv_head)?;
         let v = crate::utils::repeat_kv(v, self.n_head / self.n_kv_head)?;
 
-        let y = if self.use_flash_attn {
-            // flash-attn expects (b_sz, seq_len, nheads, head_dim)
-            let q = q.to_dtype(DType::BF16)?.transpose(1, 2)?;
-            let k = k.to_dtype(DType::BF16)?.transpose(1, 2)?;
-            let v = v.to_dtype(DType::BF16)?.transpose(1, 2)?;
+        let y = if self.use_flash_attn
+            && crate::attention::fused_attention_available(q.device(), self.head_dim)
+        {
             let softmax_scale = 1f32 / (self.head_dim as f32).sqrt();
-            flash_attn(&q, &k, &v, softmax_scale, seq_len > 1)?
-                .to_dtype(DType::F32)?
-                .transpose(1, 2)?
+            let q_bf16 = q.to_dtype(DType::BF16)?;
+            let k_bf16 = k.to_dtype(DType::BF16)?;
+            let v_bf16 = v.to_dtype(DType::BF16)?;
+            crate::attention::fused_attention(
+                &q_bf16,
+                &k_bf16,
+                &v_bf16,
+                softmax_scale,
+                seq_len > 1,
+                None,
+            )?
+            .to_dtype(DType::F32)?
         } else {
             let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
             let att = match mask {
@@ -170,22 +177,6 @@ impl LayerWeights {
         let y = self.attn_output.forward(&y)?;
         Ok(y)
     }
-}
-
-#[cfg(feature = "flash-attn")]
-fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
-}
-
-#[cfg(not(feature = "flash-attn"))]
-fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
-    unimplemented!("compile with '--features flash-attn'")
 }
 
 #[derive(Debug, Clone)]

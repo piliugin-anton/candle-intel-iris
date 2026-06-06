@@ -223,21 +223,45 @@ impl Qwen3Attention {
         let (k, v) = self.kv_cache.append(&k, &v)?;
 
         // 6. Attention dispatch: auto-select best available path
+        //    - Metal / wgpu:                fused SDPA
         //    - CPU (no flash-attn feature): fused CPU flash kernel
-        //    - GPU (flash-attn feature):    CUDA flash attention
+        //    - CUDA (flash-attn feature):   CUDA flash attention
         //    - Fallback:                    standard matmul attention
-        let on_cpu = x.device().is_cpu();
+        let device = x.device();
+        let on_cpu = device.is_cpu();
+
+        if crate::attention::uses_sdpa_device(device)
+            && crate::attention::fused_attention_available(device, self.head_dim)
+        {
+            return self.forward_sdpa_attn(&q, &k, &v, b, l);
+        }
 
         #[cfg(not(feature = "flash-attn"))]
         if on_cpu {
             return self.forward_cpu_flash_attn(&q, &k, &v, offset, b, l);
         }
         #[cfg(feature = "flash-attn")]
-        if !on_cpu {
+        if device.is_cuda() {
             return self.forward_flash_attn(&q, &k, &v, offset, b, l);
         }
 
         self.forward_standard_attn(&q, &k, &v, attn_mask, b, l)
+    }
+
+    /// Metal / wgpu fused SDPA path.
+    fn forward_sdpa_attn(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        b: usize,
+        l: usize,
+    ) -> Result<Tensor> {
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        let ctx = crate::attention::fused_attention(q, k, v, scale, l > 1, None)?;
+        ctx.transpose(1, 2)?
+            .reshape((b, l, self.hidden_size))?
+            .apply(&self.o_proj)
     }
 
     /// GPU flash attention path (requires flash-attn feature)

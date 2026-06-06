@@ -7,26 +7,6 @@ use candle_nn::{linear, linear_no_bias, VarBuilder};
 
 use crate::models::with_tracing::RmsNorm;
 
-// ==================== Flash Attention Wrapper ====================
-
-/// Flash Attention wrapper for CUDA platform
-#[cfg(feature = "flash-attn")]
-fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
-}
-
-#[cfg(not(feature = "flash-attn"))]
-#[allow(dead_code)]
-fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
-    candle::bail!("flash-attn feature not enabled, compile with '--features flash-attn'")
-}
-
 // ==================== Constants ====================
 
 /// AdaLN embedding dimension (256)
@@ -470,8 +450,8 @@ impl ZImageAttention {
         // Platform dispatch: prefer optimal implementation per platform
         if device.is_cuda() {
             self.attention_cuda(q, k, v, mask, scale)
-        } else if device.is_metal() {
-            self.attention_metal(q, k, v, mask, scale)
+        } else if crate::attention::uses_sdpa_device(device) {
+            self.attention_sdpa(q, k, v, mask, scale)
         } else {
             // CPU fallback
             self.attention_basic(q, k, v, mask, scale)
@@ -488,33 +468,18 @@ impl ZImageAttention {
         mask: Option<&Tensor>,
         scale: f64,
     ) -> Result<Tensor> {
-        #[cfg(feature = "flash-attn")]
-        {
-            // flash_attn does not directly support custom mask
-            // Fallback to basic implementation when mask is present
-            if mask.is_some() {
-                return self.attention_basic(q, k, v, mask, scale);
-            }
-
-            // flash_attn input format: (batch, seq_len, num_heads, head_size)
-            // Current format: (batch, num_heads, seq_len, head_size)
-            let q = q.transpose(1, 2)?;
-            let k = k.transpose(1, 2)?;
-            let v = v.transpose(1, 2)?;
-
-            let result = flash_attn(&q, &k, &v, scale as f32, false)?;
-            result.transpose(1, 2)
+        if mask.is_some() {
+            return self.attention_basic(q, k, v, mask, scale);
         }
-
-        #[cfg(not(feature = "flash-attn"))]
-        {
-            // flash-attn not compiled, fallback to basic
-            self.attention_basic(q, k, v, mask, scale)
+        let head_dim = q.dim(D::Minus1)?;
+        if !crate::attention::fused_attention_available(q.device(), head_dim) {
+            return self.attention_basic(q, k, v, mask, scale);
         }
+        crate::attention::fused_attention(q, k, v, scale as f32, false, None)
     }
 
-    /// Metal: Use fused SDPA kernel
-    fn attention_metal(
+    /// Metal / wgpu: Use fused SDPA kernel
+    fn attention_sdpa(
         &self,
         q: &Tensor,
         k: &Tensor,
@@ -522,13 +487,12 @@ impl ZImageAttention {
         mask: Option<&Tensor>,
         scale: f64,
     ) -> Result<Tensor> {
-        // Prepare SDPA format mask
+        let head_dim = q.dim(D::Minus1)?;
+        if !crate::attention::fused_attention_available(q.device(), head_dim) {
+            return self.attention_basic(q, k, v, mask, scale);
+        }
         let sdpa_mask = self.prepare_sdpa_mask(mask, q)?;
-
-        // candle_nn::ops::sdpa
-        // Input format: (bs, qhead, seq, hidden) - matches current format
-        // Supports: BF16/F16/F32, head_dim=128
-        candle_nn::ops::sdpa(q, k, v, sdpa_mask.as_ref(), false, scale as f32, 1.0)
+        crate::attention::fused_attention(q, k, v, scale as f32, false, sdpa_mask.as_ref())
     }
 
     /// Fallback implementation

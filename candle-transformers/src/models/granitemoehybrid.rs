@@ -240,22 +240,6 @@ struct CausalSelfAttention {
     attention_multiplier: f32,
 }
 
-#[cfg(feature = "flash-attn")]
-fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    softmax_scale: f32,
-    causal: bool,
-) -> Result<Tensor> {
-    candle_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
-}
-
-#[cfg(not(feature = "flash-attn"))]
-fn flash_attn(_: &Tensor, _: &Tensor, _: &Tensor, _: f32, _: bool) -> Result<Tensor> {
-    unimplemented!("compile with '--features flash-attn'")
-}
-
 impl CausalSelfAttention {
     fn apply_rotary_emb(
         &self,
@@ -329,12 +313,17 @@ impl CausalSelfAttention {
         let k = self.repeat_kv(k)?;
         let v = self.repeat_kv(v)?;
 
-        let y = if self.use_flash_attn {
-            // flash-attn expects (b_sz, seq_len, nheads, head_dim)
-            let q = q.transpose(1, 2)?;
-            let k = k.transpose(1, 2)?;
-            let v = v.transpose(1, 2)?;
-            flash_attn(&q, &k, &v, self.attention_multiplier, seq_len > 1)?.transpose(1, 2)?
+        let y = if self.use_flash_attn
+            && crate::attention::fused_attention_available(q.device(), self.head_dim)
+        {
+            crate::attention::fused_attention(
+                &q,
+                &k,
+                &v,
+                self.attention_multiplier,
+                seq_len > 1,
+                None,
+            )?
         } else {
             let in_dtype = q.dtype();
             let q = q.to_dtype(DType::F32)?;
