@@ -1,7 +1,7 @@
 use super::bind_group::{
     BindGroupBuilder, ConvTranspose1dUniforms, ConvTranspose2dUniforms, Im2col1dUniforms,
-    Im2col2dUniforms, Pool2dUniforms, TensorLayoutUniform, UpsampleBilinear2dUniforms,
-    UpsampleNearest1dUniforms, UpsampleNearest2dUniforms,
+    Im2col2dUniforms, NhwcToNchwUniforms, Pool2dUniforms, TensorLayoutUniform,
+    UpsampleBilinear2dUniforms, UpsampleNearest1dUniforms, UpsampleNearest2dUniforms,
 };
 use super::error::{Result, WgpuError};
 use super::intel_caps::tune_shader_source;
@@ -14,9 +14,10 @@ use crate::conv::{ParamsConv1D, ParamsConv2D, ParamsConvTranspose1D, ParamsConvT
 use crate::wgsl::{
     CONV_TRANSPOSE1D, CONV_TRANSPOSE1D_BF16, CONV_TRANSPOSE1D_F16, CONV_TRANSPOSE2D,
     CONV_TRANSPOSE2D_BF16, CONV_TRANSPOSE2D_F16, IM2COL1D, IM2COL1D_BF16, IM2COL1D_F16, IM2COL2D,
-    IM2COL2D_BF16, IM2COL2D_F16, POOL2D, POOL2D_BF16, POOL2D_F16, UPSAMPLE_BILINEAR2D,
-    UPSAMPLE_BILINEAR2D_BF16, UPSAMPLE_BILINEAR2D_F16, UPSAMPLE_NEAREST1D, UPSAMPLE_NEAREST1D_BF16,
-    UPSAMPLE_NEAREST1D_F16, UPSAMPLE_NEAREST2D, UPSAMPLE_NEAREST2D_BF16, UPSAMPLE_NEAREST2D_F16,
+    IM2COL2D_BF16, IM2COL2D_F16, NHWC_TO_NCHW, NHWC_TO_NCHW_BF16, NHWC_TO_NCHW_F16, POOL2D,
+    POOL2D_BF16, POOL2D_F16, UPSAMPLE_BILINEAR2D, UPSAMPLE_BILINEAR2D_BF16, UPSAMPLE_BILINEAR2D_F16,
+    UPSAMPLE_NEAREST1D, UPSAMPLE_NEAREST1D_BF16, UPSAMPLE_NEAREST1D_F16, UPSAMPLE_NEAREST2D,
+    UPSAMPLE_NEAREST2D_BF16, UPSAMPLE_NEAREST2D_F16,
 };
 use crate::{DType, Error, Layout, Result as CandleResult, Shape};
 
@@ -25,6 +26,14 @@ fn im2col2d_shader(dtype: DType) -> &'static str {
         DType::F16 => IM2COL2D_F16,
         DType::BF16 => IM2COL2D_BF16,
         _ => IM2COL2D,
+    }
+}
+
+fn nhwc_to_nchw_shader(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F16 => NHWC_TO_NCHW_F16,
+        DType::BF16 => NHWC_TO_NCHW_BF16,
+        _ => NHWC_TO_NCHW,
     }
 }
 
@@ -188,6 +197,45 @@ fn dispatch_im2col2d(
     Ok(col)
 }
 
+fn dispatch_nhwc_to_nchw(
+    device: &WgpuDevice,
+    src: &WgpuStorage,
+    src_offset: usize,
+    dst: &WgpuStorage,
+    dst_offset: usize,
+    b: usize,
+    h: usize,
+    w: usize,
+    c: usize,
+    dtype: DType,
+) -> Result<()> {
+    let elem_count = b * h * w * c;
+    let uniforms = NhwcToNchwUniforms {
+        elem_count: elem_count as u32,
+        b: b as u32,
+        h: h as u32,
+        w: w as u32,
+        c: c as u32,
+        src_offset: src_offset as u32,
+        dst_offset: dst_offset as u32,
+        _pad: [0; 65],
+    };
+    let entry = format!("nhwc_to_nchw_{}", float_type_suffix(dtype));
+    let kernel = compile_standard_kernel(device, nhwc_to_nchw_shader(dtype), &entry)?;
+    let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
+        device.device(),
+        device.queue(),
+        buffer_offset(dst, &Layout::contiguous(Shape::from(elem_count))),
+        buffer_offset(src, &Layout::contiguous_with_offset((b, h, w, c), src_offset)),
+        None,
+        uniforms.as_bytes(),
+    )?;
+    let grid = workgroup_count(device, elem_count);
+    src.backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;
+    Ok(())
+}
+
 fn dispatch_im2col1d(
     device: &WgpuDevice,
     src: &WgpuStorage,
@@ -302,11 +350,10 @@ pub fn conv2d(
 
     let res = dispatch_matmul(&col, &kernel_storage, (b, m, n, k), &col_l, &kernel_l)?;
 
-    let res_l = Layout::contiguous((b, h_out, w_out, n))
-        .transpose(1, 2)?
-        .transpose(1, 3)?;
-    let mut res_t = WgpuStorage::alloc(device, res_l.shape(), compute_dtype)?;
-    res.copy_strided_src(&mut res_t, 0, &res_l)?;
+    let out_shape = Shape::from((b, n, h_out, w_out));
+    let res_t = WgpuStorage::alloc(device, &out_shape, compute_dtype)?;
+    dispatch_nhwc_to_nchw(device, &res, 0, &res_t, 0, b, h_out, w_out, n, compute_dtype)
+        .map_err(Error::from)?;
     Ok(res_t)
 }
 

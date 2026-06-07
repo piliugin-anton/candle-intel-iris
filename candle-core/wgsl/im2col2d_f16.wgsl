@@ -35,6 +35,19 @@ var<storage, read> input_buf: array<f16>;
 @group(0) @binding(3)
 var<storage, read> params: Im2col2dParams;
 
+fn is_nchw_contiguous(tensor_layout: TensorLayout) -> bool {
+    if (tensor_layout.num_dims != 4u) {
+        return false;
+    }
+    let w = tensor_layout.dims[3];
+    let h = tensor_layout.dims[2];
+    let c = tensor_layout.dims[1];
+    return tensor_layout.strides[3] == 1u
+        && tensor_layout.strides[2] == w
+        && tensor_layout.strides[1] == h * w
+        && tensor_layout.strides[0] == c * h * w;
+}
+
 @compute @workgroup_size(WG_SIZE)
 fn im2col2d_f16(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -53,6 +66,9 @@ fn im2col2d_f16(
     let h_in = src_layout.dims[2];
     let w_in = src_layout.dims[3];
     let c_in = src_layout.dims[1];
+    let nchw = is_nchw_contiguous(src_layout);
+    let plane = c_in * h_in * w_in;
+    let row = h_in * w_in;
 
     let dst_s4 = w_k;
     let dst_s3 = h_k * dst_s4;
@@ -83,10 +99,20 @@ fn im2col2d_f16(
         } else {
             src_h_idx -= padding;
             src_w_idx -= padding;
-            let src_i = b_idx * src_layout.strides[0]
-                + c_idx * src_layout.strides[1]
-                + src_h_idx * src_layout.strides[2]
-                + src_w_idx * src_layout.strides[3];
+            var src_i = 0u;
+            if (nchw) {
+                src_i = src_layout.offset
+                    + b_idx * plane
+                    + c_idx * row
+                    + src_h_idx * w_in
+                    + src_w_idx;
+            } else {
+                src_i = src_layout.offset
+                    + b_idx * src_layout.strides[0]
+                    + c_idx * src_layout.strides[1]
+                    + src_h_idx * src_layout.strides[2]
+                    + src_w_idx * src_layout.strides[3];
+            }
             output_buf[tid] = input_buf[src_i];
         }
     }

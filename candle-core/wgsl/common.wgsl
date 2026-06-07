@@ -76,11 +76,57 @@ fn buffer_index(idx: u32, tensor_layout: TensorLayout) -> u32 {
     return get_strided_index(idx, tensor_layout);
 }
 
+// Set from Rust (`KernelUniforms._pad0[2]`) for bias-style broadcast add.
+const BROADCAST_BIAS_ADD: u32 = 1u;
+
+fn nchw_coords(idx: u32, tensor_layout: TensorLayout) -> vec4<u32> {
+    let w = tensor_layout.dims[3];
+    let hw = tensor_layout.dims[2] * w;
+    let chw = tensor_layout.dims[1] * hw;
+    let b_idx = idx / chw;
+    let rem = idx % chw;
+    let c_idx = rem / hw;
+    let rem2 = rem % hw;
+    let h_idx = rem2 / w;
+    let w_idx = rem2 % w;
+    return vec4<u32>(b_idx, c_idx, h_idx, w_idx);
+}
+
+fn buffer_index_bias_in0(idx: u32) -> u32 {
+    let in0 = kernel_params.in0_layout;
+    let coords = nchw_coords(idx, kernel_params.out_layout);
+    return in0.offset
+        + coords.x * in0.strides[0]
+        + coords.z * in0.strides[2]
+        + coords.w * in0.strides[3];
+}
+
+fn buffer_index_bias_in1(idx: u32) -> u32 {
+    let in1 = kernel_params.in1_layout;
+    let coords = nchw_coords(idx, kernel_params.out_layout);
+    return in1.offset + coords.x * in1.strides[0] + coords.y * in1.strides[1];
+}
+
+fn fused_bias_add_f32(idx: u32) -> f32 {
+    let coords = nchw_coords(idx, kernel_params.out_layout);
+    let in0 = kernel_params.in0_layout;
+    let in1 = kernel_params.in1_layout;
+    let i0 = in0.offset + coords.x * in0.strides[0] + coords.z * in0.strides[2] + coords.w;
+    let i1 = in1.offset + coords.x * in1.strides[0] + coords.y * in1.strides[1];
+    return input0_buf[i0] + input1_buf[i1];
+}
+
 fn load_in0(idx: u32) -> f32 {
+    if (kernel_params._pad2 == BROADCAST_BIAS_ADD) {
+        return input0_buf[buffer_index_bias_in0(idx)];
+    }
     return input0_buf[buffer_index(idx, kernel_params.in0_layout)];
 }
 
 fn load_in1(idx: u32) -> f32 {
+    if (kernel_params._pad2 == BROADCAST_BIAS_ADD) {
+        return input1_buf[buffer_index_bias_in1(idx)];
+    }
     return input1_buf[buffer_index(idx, kernel_params.in1_layout)];
 }
 
@@ -97,3 +143,4 @@ fn store_out(idx: u32, value: f32) {
 fn grid_stride_x(num_wg: vec3<u32>) -> u32 {
     return WG_SIZE * num_wg.x;
 }
+

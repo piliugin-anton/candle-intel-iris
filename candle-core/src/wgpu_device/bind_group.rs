@@ -87,6 +87,36 @@ const STANDARD_UNIFORM_MIN_BINDING: std::num::NonZeroU64 = {
     }
 };
 
+/// Matches WGSL `BROADCAST_BIAS_ADD` in `common*.wgsl`.
+pub(crate) const BROADCAST_BIAS_ADD: u32 = 1;
+
+fn is_nchw_contiguous_layout(layout: &Layout) -> bool {
+    if layout.shape().rank() != 4 {
+        return false;
+    }
+    let dims = layout.dims();
+    let strides = layout.stride();
+    strides[3] == 1
+        && strides[2] == dims[3]
+        && strides[1] == dims[2] * dims[3]
+        && strides[0] == dims[1] * dims[2] * dims[3]
+}
+
+fn is_bias_broadcast_add_pattern(out: &Layout, in0: &Layout, in1: &Layout) -> bool {
+    if !is_nchw_contiguous_layout(out)
+        || in0.shape().rank() != 4
+        || in1.shape().rank() != 4
+    {
+        return false;
+    }
+    if out.dims() != in0.dims() || out.dims() != in1.dims() {
+        return false;
+    }
+    let w = out.dims()[3];
+    in0.stride()[1] == 0 && in0.stride()[2] == w && in0.stride()[3] == 1
+        && in1.stride()[1] == 1 && in1.stride()[2] == 0 && in1.stride()[3] == 0
+}
+
 impl KernelUniforms {
     pub fn new(
         elem_count: usize,
@@ -94,7 +124,7 @@ impl KernelUniforms {
         in0_layout: &Layout,
         in1_layout: Option<&Layout>,
     ) -> Self {
-        Self {
+        let mut uniforms = Self {
             elem_count: elem_count as u32,
             _pad0: [0; 3],
             out_layout: TensorLayoutUniform::from_layout(out_layout),
@@ -103,7 +133,17 @@ impl KernelUniforms {
                 .map(TensorLayoutUniform::from_layout)
                 .unwrap_or_default(),
             _tail_pad: [0; 8],
+        };
+        if let Some(in1) = in1_layout {
+            if is_bias_broadcast_add_pattern(out_layout, in0_layout, in1) {
+                uniforms._pad0[2] = BROADCAST_BIAS_ADD;
+            }
         }
+        uniforms
+    }
+
+    pub fn uses_bias_broadcast_add(&self) -> bool {
+        self._pad0[2] == BROADCAST_BIAS_ADD
     }
 
     /// Uniform block for `const_set_*`: `_pad0[0]` holds the scalar bit pattern.
@@ -920,6 +960,16 @@ fixed_uniform!(Copy2dUniforms {
     dst_offset: u32,
 } pad 66);
 
+fixed_uniform!(NhwcToNchwUniforms {
+    elem_count: u32,
+    b: u32,
+    h: u32,
+    w: u32,
+    c: u32,
+    src_offset: u32,
+    dst_offset: u32,
+} pad 65);
+
 fixed_uniform!(RmsNormUniforms {
     n_rows: u32,
     n_cols: u32,
@@ -1109,6 +1159,7 @@ layout_uniform!(ConvTranspose1dUniforms {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Shape;
 
     #[test]
     fn affine_uniforms_pack_mul_add_into_pad0() {
@@ -1158,6 +1209,23 @@ mod tests {
             std::mem::size_of::<ConvTranspose1dUniforms>(),
             STANDARD_UNIFORM_SIZE
         );
+        assert_eq!(
+            std::mem::size_of::<NhwcToNchwUniforms>(),
+            STANDARD_UNIFORM_SIZE
+        );
+    }
+
+    #[test]
+    fn bias_broadcast_add_sets_uniform_flag() {
+        let out = Layout::contiguous(Shape::from((1, 128, 126, 126)));
+        let in0 = Layout::contiguous(Shape::from((1, 1, 126, 126)))
+            .broadcast_as(Shape::from((1, 128, 126, 126)))
+            .unwrap();
+        let in1 = Layout::contiguous(Shape::from((1, 128, 1, 1)))
+            .broadcast_as(Shape::from((1, 128, 126, 126)))
+            .unwrap();
+        let u = KernelUniforms::new(out.shape().elem_count(), &out, &in0, Some(&in1));
+        assert_eq!(u._pad0[2], BROADCAST_BIAS_ADD);
     }
 
     #[test]

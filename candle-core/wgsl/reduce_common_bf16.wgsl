@@ -64,13 +64,87 @@ fn reduce_src_index(dst_id: u32, chunk_offset: u32) -> u32 {
     return src_idx;
 }
 
-fn reduce_load_src(dst_id: u32, chunk_offset: u32) -> f32 {
-    let elem = reduce_src_index(dst_id, chunk_offset);
+fn is_contiguous(tensor_layout: TensorLayout) -> bool {
+    var acc = 1u;
+    let num_dims = tensor_layout.num_dims;
+    for (var d = 0u; d < num_dims; d = d + 1u) {
+        let dim_idx = num_dims - 1u - d;
+        let dim = tensor_layout.dims[dim_idx];
+        if (dim > 1u && acc != tensor_layout.strides[dim_idx]) {
+            return false;
+        }
+        acc *= dim;
+    }
+    return true;
+}
+
+fn reduce_dim_is_inner_contiguous() -> bool {
+    let src = reduce_params.src_layout;
+    let dim = reduce_params._pad0;
+    if (!is_contiguous(src)) {
+        return false;
+    }
+    if (dim + 1u != src.num_dims) {
+        return false;
+    }
+    return src.strides[dim] == 1u;
+}
+
+fn reduce_src_base(dst_id: u32) -> u32 {
+    return reduce_src_index(dst_id, 0u);
+}
+
+fn reduce_load_elem_linear(elem: u32) -> f32 {
     let word = elem / 2u;
     let byte_off = (elem % 2u) * 2u;
     let packed = reduce_in[word];
     let bf16 = (packed >> (byte_off * 8u)) & 0xFFFFu;
     return bf16_bits_to_f32(bf16);
+}
+
+fn load_bf16_linear_vec4(elem_base: u32) -> vec4<f32> {
+    let w0 = reduce_in[elem_base / 2u];
+    let w1 = reduce_in[elem_base / 2u + 1u];
+    return vec4<f32>(
+        bf16_bits_to_f32(w0 & 0xFFFFu),
+        bf16_bits_to_f32(w0 >> 16u),
+        bf16_bits_to_f32(w1 & 0xFFFFu),
+        bf16_bits_to_f32(w1 >> 16u),
+    );
+}
+
+fn reduce_sum_inner_contiguous(dst_id: u32, chunk: u32, tid: u32) -> f32 {
+    let base = reduce_src_base(dst_id);
+    var acc = 0.0;
+    var chunk_off = tid * 4u;
+    let chunk_vec = (chunk / 4u) * 4u;
+    let aligned = (base % 4u) == 0u;
+    while (chunk_off < chunk_vec) {
+        let elem = base + chunk_off;
+        if (aligned) {
+            let v = load_bf16_linear_vec4(elem);
+            acc += v.x + v.y + v.z + v.w;
+        } else {
+            acc += reduce_load_elem_linear(elem)
+                + reduce_load_elem_linear(elem + 1u)
+                + reduce_load_elem_linear(elem + 2u)
+                + reduce_load_elem_linear(elem + 3u);
+        }
+        chunk_off += REDUCE_WG_SIZE * 4u;
+    }
+    while (chunk_off < chunk) {
+        acc += reduce_load_elem_linear(base + chunk_off);
+        chunk_off += REDUCE_WG_SIZE;
+    }
+    return acc;
+}
+
+fn reduce_load_src(dst_id: u32, chunk_offset: u32) -> f32 {
+    if (reduce_dim_is_inner_contiguous()) {
+        return reduce_load_elem_linear(reduce_src_base(dst_id) + chunk_offset);
+    }
+    let elem = reduce_src_index(dst_id, chunk_offset);
+    return reduce_load_elem_linear(elem);
 }
 
 fn reduce_store_out(dst_id: u32, value: f32) {

@@ -69,6 +69,36 @@ fn buffer_index(idx: u32, tensor_layout: TensorLayout) -> u32 {
     return get_strided_index(idx, tensor_layout);
 }
 
+const BROADCAST_BIAS_ADD: u32 = 1u;
+
+fn nchw_coords(idx: u32, tensor_layout: TensorLayout) -> vec4<u32> {
+    let w = tensor_layout.dims[3];
+    let hw = tensor_layout.dims[2] * w;
+    let chw = tensor_layout.dims[1] * hw;
+    let b_idx = idx / chw;
+    let rem = idx % chw;
+    let c_idx = rem / hw;
+    let rem2 = rem % hw;
+    let h_idx = rem2 / w;
+    let w_idx = rem2 % w;
+    return vec4<u32>(b_idx, c_idx, h_idx, w_idx);
+}
+
+fn buffer_index_bias_in0(idx: u32) -> u32 {
+    let in0 = kernel_params.in0_layout;
+    let coords = nchw_coords(idx, kernel_params.out_layout);
+    return in0.offset
+        + coords.x * in0.strides[0]
+        + coords.z * in0.strides[2]
+        + coords.w * in0.strides[3];
+}
+
+fn buffer_index_bias_in1(idx: u32) -> u32 {
+    let in1 = kernel_params.in1_layout;
+    let coords = nchw_coords(idx, kernel_params.out_layout);
+    return in1.offset + coords.x * in1.strides[0] + coords.y * in1.strides[1];
+}
+
 fn bf16_bits_to_f32(bits: u32) -> f32 {
     return bitcast<f32>(bits << 16u);
 }
@@ -78,7 +108,12 @@ fn f32_to_bf16_bits(value: f32) -> u32 {
 }
 
 fn load_bf16_in0(idx: u32) -> f32 {
-    let elem = buffer_index(idx, kernel_params.in0_layout);
+    var elem = 0u;
+    if (kernel_params._pad2 == BROADCAST_BIAS_ADD) {
+        elem = buffer_index_bias_in0(idx);
+    } else {
+        elem = buffer_index(idx, kernel_params.in0_layout);
+    }
     let word = elem / 2u;
     let byte_off = (elem % 2u) * 2u;
     let packed = input0_buf[word];
@@ -87,7 +122,12 @@ fn load_bf16_in0(idx: u32) -> f32 {
 }
 
 fn load_bf16_in1(idx: u32) -> f32 {
-    let elem = buffer_index(idx, kernel_params.in1_layout);
+    var elem = 0u;
+    if (kernel_params._pad2 == BROADCAST_BIAS_ADD) {
+        elem = buffer_index_bias_in1(idx);
+    } else {
+        elem = buffer_index(idx, kernel_params.in1_layout);
+    }
     let word = elem / 2u;
     let byte_off = (elem % 2u) * 2u;
     let packed = input1_buf[word];
@@ -120,4 +160,21 @@ fn store_bf16_out(idx: u32, value: f32) {
 
 fn grid_stride_x(num_wg: vec3<u32>) -> u32 {
     return WG_SIZE * num_wg.x;
+}
+
+fn fused_bias_add_bf16(idx: u32) -> f32 {
+    let coords = nchw_coords(idx, kernel_params.out_layout);
+    let in0 = kernel_params.in0_layout;
+    let in1 = kernel_params.in1_layout;
+    let i0 = in0.offset + coords.x * in0.strides[0] + coords.z * in0.strides[2] + coords.w;
+    let i1 = in1.offset + coords.x * in1.strides[0] + coords.y * in1.strides[1];
+    let word0 = i0 / 2u;
+    let off0 = (i0 % 2u) * 2u;
+    let packed0 = input0_buf[word0];
+    let bf0 = (packed0 >> (off0 * 8u)) & 0xFFFFu;
+    let word1 = i1 / 2u;
+    let off1 = (i1 % 2u) * 2u;
+    let packed1 = input1_buf[word1];
+    let bf1 = (packed1 >> (off1 * 8u)) & 0xFFFFu;
+    return bf16_bits_to_f32(bf0) + bf16_bits_to_f32(bf1);
 }

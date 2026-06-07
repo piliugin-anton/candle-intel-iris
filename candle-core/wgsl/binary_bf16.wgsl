@@ -10,8 +10,13 @@ fn add_bf16(
 ) {
     let stride = grid_stride_x(num_wg);
     let count = kernel_params.elem_count;
+    let bias_add = kernel_params._pad2 == BROADCAST_BIAS_ADD;
     for (var i = gid.x; i < count; i = i + stride) {
-        store_bf16_out(i, load_bf16_in0(i) + load_bf16_in1(i));
+        if (bias_add) {
+            store_bf16_out(i, fused_bias_add_bf16(i));
+        } else {
+            store_bf16_out(i, load_bf16_in0(i) + load_bf16_in1(i));
+        }
     }
 }
 

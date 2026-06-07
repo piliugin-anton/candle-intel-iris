@@ -118,8 +118,12 @@ fn select_matmul_kernel(
     let vec_width = caps.matmul_vec_width as usize;
     let vec_aligned = k.is_multiple_of(vec_width) && n.is_multiple_of(vec_width);
     let large_enough = m >= 8 || n >= 8 || k >= 8;
-    // Tiled kernels pay 2 barriers per K-tile; prefer naive when M or N is thinner than a tile.
-    let use_tiled = tiled && large_enough && m >= tile && n >= tile;
+    // Tiled kernels pay 2 barriers per K-tile; prefer naive only when both M and N are thin.
+    // Conv2d im2col often has large M (spatial) with small N (out channels).
+    let use_tiled = tiled
+        && large_enough
+        && m >= tile
+        && (n >= tile || m >= tile * 4);
 
     match (storage_dtype, compute_dtype) {
         (DType::F16, DType::F32) if caps.supports_shader_f16 => {
@@ -394,6 +398,8 @@ struct ElemwiseDispatch<'a> {
     in0_layout: &'a Layout,
     in1: Option<(&'a WgpuStorage, &'a Layout)>,
     backing: &'a super::storage::BufferBacking,
+    uniforms: Option<KernelUniforms>,
+    grid_elems: Option<usize>,
 }
 
 struct ElemwiseBf16Dispatch<'a> {
@@ -407,6 +413,7 @@ struct ElemwiseBf16Dispatch<'a> {
     in1: Option<(&'a WgpuStorage, &'a Layout)>,
     backing: &'a super::storage::BufferBacking,
     uniforms: KernelUniforms,
+    grid_elems: Option<usize>,
 }
 
 /// Packed-bf16 elemwise dispatch (grid-stride loops with per-element atomic RMW).
@@ -422,6 +429,7 @@ fn dispatch_elemwise_bf16(args: ElemwiseBf16Dispatch<'_>) -> Result<()> {
         in1,
         backing,
         uniforms,
+        grid_elems,
     } = args;
     let kernel = compile_elemwise_kernel(device, source, entry_point)?;
     let bind_group_builder = BindGroupBuilder::new();
@@ -435,7 +443,8 @@ fn dispatch_elemwise_bf16(args: ElemwiseBf16Dispatch<'_>) -> Result<()> {
         in1_offset,
         uniforms.as_bytes(),
     )?;
-    let grid = elemwise_workgroup_count(device, out_layout.shape().elem_count());
+    let grid_count = grid_elems.unwrap_or_else(|| out_layout.shape().elem_count());
+    let grid = elemwise_workgroup_count(device, grid_count);
     backing.with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
 }
 
@@ -450,14 +459,19 @@ fn dispatch_elemwise(args: ElemwiseDispatch<'_>) -> Result<()> {
         in0_layout,
         in1,
         backing,
+        uniforms,
+        grid_elems,
     } = args;
     let kernel = compile_elemwise_kernel(device, source, entry_point)?;
-    let uniforms = KernelUniforms::new(
-        out_layout.shape().elem_count(),
-        out_layout,
-        in0_layout,
-        in1.map(|(_, l)| l),
-    );
+    let uniforms = uniforms.unwrap_or_else(|| {
+        KernelUniforms::new(
+            out_layout.shape().elem_count(),
+            out_layout,
+            in0_layout,
+            in1.map(|(_, l)| l),
+        )
+    });
+    let grid_count = grid_elems.unwrap_or_else(|| out_layout.shape().elem_count());
     let bind_group_builder = BindGroupBuilder::new();
     let in0_offset = buffer_offset(in0, in0_layout);
     let in1_offset = in1.map(|(storage, layout)| buffer_offset(storage, layout));
@@ -469,7 +483,7 @@ fn dispatch_elemwise(args: ElemwiseDispatch<'_>) -> Result<()> {
         in1_offset,
         uniforms.as_bytes(),
     )?;
-    let grid = elemwise_workgroup_count(device, out_layout.shape().elem_count());
+    let grid = elemwise_workgroup_count(device, grid_count);
     backing.with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))
 }
 
@@ -581,6 +595,7 @@ pub fn dispatch_affine(
                 in1: None,
                 backing: storage.backing(),
                 uniforms,
+                grid_elems: None,
             })
             .map_err(Error::from)?;
             return Ok(out);
@@ -811,6 +826,7 @@ fn dispatch_unary_param(
                 in1: None,
                 backing: storage.backing(),
                 uniforms,
+                grid_elems: None,
             })
             .map_err(Error::from)?;
             return Ok(out);
@@ -923,6 +939,7 @@ pub fn dispatch_unary<B: UnaryOpT>(
                 in1: None,
                 backing: storage.backing(),
                 uniforms,
+                grid_elems: None,
             })
             .map_err(Error::from)?;
             return Ok(out);
@@ -954,6 +971,8 @@ pub fn dispatch_unary<B: UnaryOpT>(
                 in0_layout: layout,
                 in1: None,
                 backing: storage.backing(),
+                uniforms: None,
+                grid_elems: None,
             })
             .map_err(Error::from)?;
             return Ok(out);
@@ -985,6 +1004,8 @@ pub fn dispatch_unary<B: UnaryOpT>(
         in0_layout: layout,
         in1: None,
         backing: storage.backing(),
+        uniforms: None,
+        grid_elems: None,
     })
     .map_err(Error::from)?;
     Ok(out)
@@ -1003,15 +1024,15 @@ pub fn dispatch_binary<B: BinaryOpT>(
     let device = lhs.device().clone();
     if dtype == DType::BF16 {
         if device.caps().supports_bf16_gpu_kernels() {
+            let out_shape = lhs_layout.shape();
+            let out = WgpuStorage::alloc(&device, out_shape, DType::BF16)?;
+            let out_layout = Layout::contiguous(out_shape);
             let entry = binary_entry_point_bf16(B::KERNEL).ok_or_else(|| {
                 WgpuError::Message(format!(
                     "wgpu bf16 binary kernel not available for op {}",
                     B::NAME
                 ))
             })?;
-            let out_shape = lhs_layout.shape();
-            let out = WgpuStorage::alloc(&device, out_shape, DType::BF16)?;
-            let out_layout = Layout::contiguous(out_shape);
             let uniforms = KernelUniforms::new(
                 out_layout.shape().elem_count(),
                 &out_layout,
@@ -1029,6 +1050,7 @@ pub fn dispatch_binary<B: BinaryOpT>(
                 in1: Some((rhs, rhs_layout)),
                 backing: lhs.backing(),
                 uniforms,
+                grid_elems: None,
             })
             .map_err(Error::from)?;
             return Ok(out);
@@ -1063,6 +1085,8 @@ pub fn dispatch_binary<B: BinaryOpT>(
                 in0_layout: lhs_layout,
                 in1: Some((rhs, rhs_layout)),
                 backing: lhs.backing(),
+                uniforms: None,
+                grid_elems: None,
             })
             .map_err(Error::from)?;
             return Ok(out);
@@ -1159,6 +1183,8 @@ pub fn dispatch_binary<B: BinaryOpT>(
         in0_layout: lhs_layout,
         in1: Some((rhs, rhs_layout)),
         backing: lhs.backing(),
+        uniforms: None,
+        grid_elems: None,
     })
     .map_err(Error::from)?;
     Ok(out)
@@ -2177,6 +2203,7 @@ fn dispatch_unary_kernel(
                 in1: None,
                 backing: storage.backing(),
                 uniforms,
+                grid_elems: None,
             })
             .map_err(Error::from)?;
             return Ok(out);
@@ -2205,6 +2232,8 @@ fn dispatch_unary_kernel(
                 in0_layout: layout,
                 in1: None,
                 backing: storage.backing(),
+                uniforms: None,
+                grid_elems: None,
             })
             .map_err(Error::from)?;
             return Ok(out);
@@ -2232,6 +2261,8 @@ fn dispatch_unary_kernel(
         in0_layout: layout,
         in1: None,
         backing: storage.backing(),
+        uniforms: None,
+        grid_elems: None,
     })
     .map_err(Error::from)?;
     Ok(out)

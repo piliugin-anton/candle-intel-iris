@@ -21,10 +21,14 @@ fn reduce_sum_bf16(
     let tid = local_id.x;
 
     var acc = 0.0;
-    var chunk_off = tid;
-    while (chunk_off < chunk) {
-        acc += reduce_load_src(dst_id, chunk_off);
-        chunk_off += REDUCE_WG_SIZE;
+    if (reduce_dim_is_inner_contiguous()) {
+        acc = reduce_sum_inner_contiguous(dst_id, chunk, tid);
+    } else {
+        var chunk_off = tid;
+        while (chunk_off < chunk) {
+            acc += reduce_load_src(dst_id, chunk_off);
+            chunk_off += REDUCE_WG_SIZE;
+        }
     }
     wg_sum[tid] = acc;
     workgroup_reduce_sum(tid);
@@ -49,10 +53,14 @@ fn reduce_mean_bf16(
     let tid = local_id.x;
 
     var acc = 0.0;
-    var chunk_off = tid;
-    while (chunk_off < chunk) {
-        acc += reduce_load_src(dst_id, chunk_off);
-        chunk_off += REDUCE_WG_SIZE;
+    if (reduce_dim_is_inner_contiguous()) {
+        acc = reduce_sum_inner_contiguous(dst_id, chunk, tid);
+    } else {
+        var chunk_off = tid;
+        while (chunk_off < chunk) {
+            acc += reduce_load_src(dst_id, chunk_off);
+            chunk_off += REDUCE_WG_SIZE;
+        }
     }
     wg_sum[tid] = acc;
     workgroup_reduce_sum(tid);

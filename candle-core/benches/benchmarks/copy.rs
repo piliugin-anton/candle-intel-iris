@@ -16,10 +16,9 @@ fn run_copy_mask_benchmark<D: WithDType>(c: &mut Criterion, device: &Device, nam
     group.throughput(Throughput::Bytes(size_in_bytes as u64));
     group.bench_function("iter", move |b| {
         b.iter_custom(|iters| {
-            let attn_masks = vec![attn_mask.clone(); iters as usize];
             let start = Instant::now();
-            for attn_mask in attn_masks.into_iter() {
-                let tensor = Tensor::new(black_box(attn_mask), device).unwrap();
+            for _ in 0..iters {
+                let tensor = Tensor::new(black_box(attn_mask.clone()), device).unwrap();
                 black_box(tensor);
             }
             device.sync().unwrap();
