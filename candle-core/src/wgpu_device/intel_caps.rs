@@ -146,6 +146,7 @@ impl IntelCaps {
             _ => false,
         }
     }
+
 }
 
 /// Detect Intel GPU generation from PCI device id and adapter name.

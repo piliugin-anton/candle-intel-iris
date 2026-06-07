@@ -1,6 +1,4 @@
-// Matrix multiplication: packed bf16 inputs (u32 words), f32 output.
-//
-// Avoids full-tensor bf16→f32 upcast on Gen11 (FP32 compute policy).
+// Matrix multiplication: packed bf16 inputs and output (u32 words), f32 accumulation.
 
 const MAX_DIMS: u32 = 8u;
 const MATMUL_WG_SIZE: u32 = 16u;
@@ -25,7 +23,7 @@ struct MatMulParams {
 }
 
 @group(0) @binding(0)
-var<storage, read_write> c_buf: array<f32>;
+var<storage, read_write> c_buf: array<atomic<u32>>;
 
 @group(0) @binding(1)
 var<storage, read> a_buf: array<u32>;
@@ -74,6 +72,24 @@ fn mm_load_b(batch: u32, row: u32, col: u32) -> f32 {
     return read_bf16_b(mm_elem_index(mm_params.b_layout, batch, row, col));
 }
 
+fn write_bf16_c(elem_idx: u32, value: f32) {
+    let word = elem_idx / 2u;
+    let byte_off = (elem_idx % 2u) * 2u;
+    let shift = byte_off * 8u;
+    let bf16 = (bitcast<u32>(value) >> 16u) & 0xFFFFu;
+    let mask = ~(0xFFFFu << shift);
+    let contribution = bf16 << shift;
+    var old = atomicLoad(&c_buf[word]);
+    loop {
+        let new_val = (old & mask) | contribution;
+        let exch = atomicCompareExchangeWeak(&c_buf[word], old, new_val);
+        if (exch.exchanged) {
+            break;
+        }
+        old = exch.old_value;
+    }
+}
+
 fn mm_store_c(batch: u32, row: u32, col: u32, value: f32) {
-    c_buf[mm_elem_index(mm_params.c_layout, batch, row, col)] = value;
+    write_bf16_c(mm_elem_index(mm_params.c_layout, batch, row, col), value);
 }

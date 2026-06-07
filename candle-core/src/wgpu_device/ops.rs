@@ -148,10 +148,11 @@ fn select_matmul_kernel(
             }
         }
         (DType::BF16, DType::BF16) if caps.supports_native_bf16() => {
+            // F32 accumulation from packed bf16 loads beats native bf16 tile math on Iris Xe.
             if use_tiled && vec_aligned {
-                MatMulKernel::TiledVecBf16
+                MatMulKernel::TiledVecBf16AccF32
             } else {
-                MatMulKernel::TiledBf16
+                MatMulKernel::TiledBf16AccF32
             }
         }
         _ => {
@@ -1240,18 +1241,14 @@ pub fn dispatch_matmul(
     }
 
     if storage_dtype == DType::BF16 && !device.caps().supports_native_bf16() {
-        let out_shape = {
-            let lhs_dims = lhs_layout.shape().dims();
-            let dim = lhs_dims.len();
-            let mut out_dims = lhs_dims[..dim - 2].to_vec();
-            out_dims.push(m);
-            out_dims.push(n);
-            Shape::from(out_dims)
-        };
-        let out_layout = Layout::contiguous(&out_shape);
-        let out_f32 =
-            dispatch_matmul_inner(lhs, rhs, (b, m, n, k), lhs_layout, rhs_layout, DType::F32)?;
-        return out_f32.to_dtype(&out_layout, DType::BF16);
+        return dispatch_matmul_inner(
+            lhs,
+            rhs,
+            (b, m, n, k),
+            lhs_layout,
+            rhs_layout,
+            DType::BF16,
+        );
     }
 
     dispatch_matmul_inner(
