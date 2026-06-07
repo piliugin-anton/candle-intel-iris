@@ -9,9 +9,10 @@
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_sum_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -36,9 +37,10 @@ fn reduce_sum_bf16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_mean_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -64,9 +66,10 @@ fn reduce_mean_bf16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_max_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -91,9 +94,10 @@ fn reduce_max_bf16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_min_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -119,9 +123,10 @@ fn reduce_min_bf16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_argmax_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -157,9 +162,10 @@ fn reduce_argmax_bf16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_argmin_bf16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }

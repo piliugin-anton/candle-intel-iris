@@ -7,12 +7,12 @@
 
 // Abramowitz & Stegun 7.1.26 — matches libm erf within ~1e-7 for typical ranges.
 fn erf_approx(x: f16) -> f16 {
-    let sign = select(-1.0, 1.0, x >= 0.0);
+    let sign = select(-1.0h, 1.0h, x >= 0.0h);
     let ax = abs(x);
-    let t = 1.0 / (1.0 + 0.3275911 * ax);
-    let y = 1.0
-        - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
-            + 0.254829592)
+    let t = 1.0h / (1.0h + 0.3275911h * ax);
+    let y = 1.0h
+        - (((((1.061405429h * t - 1.453152027h) * t + 1.421413741h) * t - 0.284496736h) * t
+            + 0.254829592h)
             * t
             * exp(-ax * ax));
     return sign * y;
@@ -21,14 +21,14 @@ fn erf_approx(x: f16) -> f16 {
 const INV_SQRT_2: f16 = 0.7071067811865476;
 
 fn sign_f16_val(x: f16) -> f16 {
-    return select(0.0, 1.0, x > 0.0) - select(0.0, 1.0, x < 0.0);
+    return select(0.0h, 1.0h, x > 0.0h) - select(0.0h, 1.0h, x < 0.0h);
 }
 
 // Tanh approximation (matches Candle `Gelu` / PyTorch `approximate='tanh'`).
 const GELU_SQRT_2_OVER_PI: f16 = 0.7978845608028654;
 
 fn gelu_approx(x: f16) -> f16 {
-    return 0.5 * x * (1.0 + tanh(GELU_SQRT_2_OVER_PI * x * (1.0 + 0.044715 * x * x)));
+    return 0.5h * x * (1.0h + tanh(GELU_SQRT_2_OVER_PI * x * (1.0h + 0.044715h * x * x)));
 }
 
 @compute @workgroup_size(WG_SIZE)

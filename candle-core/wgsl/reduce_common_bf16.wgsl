@@ -85,6 +85,10 @@ fn reduce_store_out(dst_id: u32, value: f32) {
     reduce_out[word] = packed;
 }
 
+fn reduce_dst_id(wg_id: vec3<u32>, num_wg: vec3<u32>) -> u32 {
+    return wg_id.x + wg_id.y * num_wg.x + wg_id.z * num_wg.x * num_wg.y;
+}
+
 var<workgroup> wg_sum: array<f32, REDUCE_WG_SIZE>;
 var<workgroup> wg_max_val: array<f32, REDUCE_WG_SIZE>;
 var<workgroup> wg_max_idx: array<u32, REDUCE_WG_SIZE>;

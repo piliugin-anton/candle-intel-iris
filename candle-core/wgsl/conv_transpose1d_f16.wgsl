@@ -3,6 +3,8 @@ enable f16;
 
 const MAX_DIMS: u32 = 8u;
 
+const WG_SIZE: u32 = 32u;
+
 struct TensorLayout {
     dims: array<u32, MAX_DIMS>,
     strides: array<u32, MAX_DIMS>,
@@ -36,12 +38,12 @@ var<storage, read> kernel_buf: array<f16>;
 @group(0) @binding(4)
 var<storage, read> params: ConvTranspose1dParams;
 
-@compute @workgroup_size(32)
+@compute @workgroup_size(WG_SIZE)
 fn conv_transpose1d_f16(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let stride_wg = 32u * num_wg.x;
+    let stride_wg = WG_SIZE * num_wg.x;
     let p = params;
     let in_layout = p.src_layout;
     let k_layout = p.kernel_layout;
@@ -60,7 +62,7 @@ fn conv_transpose1d_f16(
         let out_x = tid % l_out;
 
         let src_idx0 = in_layout.offset + b_idx * in_layout.strides[0];
-        var acc = 0.0;
+        var acc = 0.0h;
         for (var k_x = 0; k_x < i32(l_k); k_x = k_x + 1) {
             let inp_x_stride = i32(out_x + padding) - k_x * i32(dilation);
             if (inp_x_stride < 0 || inp_x_stride % i32(stride) != 0) {

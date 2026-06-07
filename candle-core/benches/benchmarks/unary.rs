@@ -4,11 +4,10 @@ use criterion::{criterion_group, Criterion, Throughput};
 use std::hint::black_box;
 use std::time::Instant;
 
-fn run_sqrt(a: &Tensor) {
-    a.sqrt().unwrap();
-}
-
-fn run_unary_benchmark(c: &mut Criterion, device: &Device, dtype: DType, name: &str) {
+fn run_unary_benchmark<F>(c: &mut Criterion, device: &Device, dtype: DType, name: &str, op: F)
+where
+    F: Fn(&Tensor) + Copy,
+{
     let b = 1;
     let m = 1024;
     let k = 1024;
@@ -28,7 +27,7 @@ fn run_unary_benchmark(c: &mut Criterion, device: &Device, dtype: DType, name: &
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _i in 0..iters {
-                run_sqrt(black_box(&tensor));
+                op(black_box(&tensor));
             }
             device.sync().unwrap();
             start.elapsed()
@@ -89,8 +88,22 @@ fn criterion_benchmark(c: &mut Criterion) {
             run_cast_benchmark(c, &device, dtype, to_dtype, &name);
         }
         for dtype in [DType::F32, DType::BF16, DType::F16] {
-            let name = format!("sqrt_{dtype:?}");
-            run_unary_benchmark(c, &device, dtype, &name);
+            let dt = format!("{dtype:?}");
+            run_unary_benchmark(c, &device, dtype, &format!("sqrt_{dt}"), |t| {
+                t.sqrt().unwrap();
+            });
+            run_unary_benchmark(c, &device, dtype, &format!("exp_{dt}"), |t| {
+                t.exp().unwrap();
+            });
+            run_unary_benchmark(c, &device, dtype, &format!("gelu_{dt}"), |t| {
+                t.gelu().unwrap();
+            });
+            run_unary_benchmark(c, &device, dtype, &format!("silu_{dt}"), |t| {
+                t.silu().unwrap();
+            });
+            run_unary_benchmark(c, &device, dtype, &format!("tanh_{dt}"), |t| {
+                t.tanh().unwrap();
+            });
         }
     }
 }

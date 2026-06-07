@@ -21,6 +21,8 @@ fn pack_bf16_value(packed: u32, elem_idx: u32, value: f32) -> u32 {
 }
 const MAX_DIMS: u32 = 8u;
 
+const WG_SIZE: u32 = 32u;
+
 struct TensorLayout {
     dims: array<u32, MAX_DIMS>,
     strides: array<u32, MAX_DIMS>,
@@ -50,12 +52,12 @@ var<storage, read> input_buf: array<u32>;
 @group(0) @binding(3)
 var<storage, read> params: Im2col1dParams;
 
-@compute @workgroup_size(32)
+@compute @workgroup_size(WG_SIZE)
 fn im2col1d_bf16(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let stride_wg = 32u * num_wg.x;
+    let stride_wg = WG_SIZE * num_wg.x;
     let p = params;
     let l_out = p.l_out;
     let l_k = p.l_k;

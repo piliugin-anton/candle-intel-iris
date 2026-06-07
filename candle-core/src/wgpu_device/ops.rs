@@ -5,7 +5,7 @@ use super::bind_group::{
 };
 use super::error::{Result, WgpuError};
 use super::intel_caps::{tune_matmul_shader_source, IntelGeneration};
-use super::kernel::{elemwise_workgroup_count, workgroup_count, WgpuKernel};
+use super::kernel::{elemwise_workgroup_count, per_elem_dispatch_grid, workgroup_count, WgpuKernel};
 use super::storage::{
     buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE,
 };
@@ -20,7 +20,7 @@ use crate::wgsl::{
     DEQUANT_Q8_0, LAYER_NORM, LAYER_NORM_BF16, LAYER_NORM_F16, MATMUL_GEMV, MATMUL_NAIVE,
     MATMUL_TILED,
     MATMUL_TILED_BF16, MATMUL_TILED_BF16ACC, MATMUL_TILED_F16, MATMUL_TILED_F16ACC,
-    MATMUL_TILED_VEC, MATMUL_VEC_WIDTH, QMATMUL_Q4_0, QMATMUL_Q4_0_F16, QMATMUL_Q4_K,
+    MATMUL_TILED_VEC, QMATMUL_Q4_0, QMATMUL_Q4_0_F16, QMATMUL_Q4_K,
     QMATMUL_Q4_K_F16, QMATMUL_Q5_0, QMATMUL_Q5_0_F16, QMATMUL_Q8_0, QMATMUL_Q8_0_F16,
     QUANT_Q4_0, QUANT_Q5_0, QUANT_Q8_0, REDUCE, REDUCE_BF16, REDUCE_F16, RMS_NORM, RMS_NORM_BF16,
     RMS_NORM_F16, ROPE, ROPE_BF16, ROPE_F16, ROPE_I, ROPE_I_BF16, ROPE_I_F16, ROPE_THD,
@@ -521,7 +521,11 @@ fn compile_matmul_kernel(device: &WgpuDevice, kernel: MatMulKernel) -> Result<Wg
     let caps = device.caps();
     let (tuned, wg) = match kernel {
         MatMulKernel::GemvF32 | MatMulKernel::GemvColF32 => {
-            (super::intel_caps::tune_shader_source(source, caps), caps.elem_workgroup_size)
+            let tuned = tune_matmul_shader_source(
+                &super::intel_caps::tune_shader_source(source, caps),
+                caps,
+            );
+            (tuned, caps.elem_workgroup_size)
         }
         _ => (
             tune_matmul_shader_source(source, caps),
@@ -1748,7 +1752,7 @@ pub fn dispatch_reduce(
     storage
         .backing()
         .with_unmapped(|| {
-            kernel.dispatch_bind_group(&device, &bind_group, [dst_elem_count as u32, 1, 1])
+            kernel.dispatch_bind_group(&device, &bind_group, per_elem_dispatch_grid(dst_elem_count))
         })
         .map_err(Error::from)?;
     if arg_index {

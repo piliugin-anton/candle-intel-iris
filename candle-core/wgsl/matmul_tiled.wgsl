@@ -6,9 +6,32 @@
 // Entry point: matmul_tiled_f32
 
 const TILE: u32 = MATMUL_WG_SIZE;
+const VEC: u32 = 4u;
 
 var<workgroup> tile_a: array<f32, 256>; // TILE * TILE
 var<workgroup> tile_b: array<f32, 256>;
+
+fn tile_dot_vec(ty: u32, tx: u32, k_base: u32) -> f32 {
+    var acc = 0.0;
+    let steps = VEC / 4u;
+    for (var i = 0u; i < steps; i = i + 1u) {
+        let kb = k_base + i * 4u;
+        let a_vec = vec4<f32>(
+            tile_a[ty * TILE + kb],
+            tile_a[ty * TILE + kb + 1u],
+            tile_a[ty * TILE + kb + 2u],
+            tile_a[ty * TILE + kb + 3u],
+        );
+        let b_vec = vec4<f32>(
+            tile_b[kb * TILE + tx],
+            tile_b[(kb + 1u) * TILE + tx],
+            tile_b[(kb + 2u) * TILE + tx],
+            tile_b[(kb + 3u) * TILE + tx],
+        );
+        acc += dot(a_vec, b_vec);
+    }
+    return acc;
+}
 
 @compute @workgroup_size(TILE, TILE)
 fn matmul_tiled_f32(
@@ -48,8 +71,8 @@ fn matmul_tiled_f32(
 
         workgroupBarrier();
 
-        for (var k = 0u; k < TILE; k = k + 1u) {
-            acc = fma(tile_a[ty * TILE + k], tile_b[k * TILE + tx], acc);
+        for (var k = 0u; k < TILE; k = k + VEC) {
+            acc += tile_dot_vec(ty, tx, k);
         }
 
         workgroupBarrier();

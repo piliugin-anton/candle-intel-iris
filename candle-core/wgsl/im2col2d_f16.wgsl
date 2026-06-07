@@ -3,6 +3,8 @@ enable f16;
 
 const MAX_DIMS: u32 = 8u;
 
+const WG_SIZE: u32 = 32u;
+
 struct TensorLayout {
     dims: array<u32, MAX_DIMS>,
     strides: array<u32, MAX_DIMS>,
@@ -33,12 +35,12 @@ var<storage, read> input_buf: array<f16>;
 @group(0) @binding(3)
 var<storage, read> params: Im2col2dParams;
 
-@compute @workgroup_size(32)
+@compute @workgroup_size(WG_SIZE)
 fn im2col2d_f16(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let stride_wg = 32u * num_wg.x;
+    let stride_wg = WG_SIZE * num_wg.x;
     let p = params;
     let h_out = p.h_out;
     let w_out = p.w_out;
@@ -75,9 +77,9 @@ fn im2col2d_f16(
         var src_h_idx = h_idx * stride + h_k_idx * dilation;
         var src_w_idx = w_idx * stride + w_k_idx * dilation;
         if (src_h_idx < padding || src_h_idx >= h_in + padding) {
-            output_buf[tid] = 0.0;
+            output_buf[tid] = 0.0h;
         } else if (src_w_idx < padding || src_w_idx >= w_in + padding) {
-            output_buf[tid] = 0.0;
+            output_buf[tid] = 0.0h;
         } else {
             src_h_idx -= padding;
             src_w_idx -= padding;

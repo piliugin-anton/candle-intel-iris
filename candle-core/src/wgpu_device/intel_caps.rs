@@ -63,12 +63,9 @@ impl IntelCaps {
         // wgpu 29 does not expose a dedicated bf16 shader feature; infer from generation.
         let supports_shader_bf16 =
             supports_shader_f16 && matches!(detect_generation(info), IntelGeneration::Gen12Plus);
-        // Wider vec4 dot unrolls help Gen12+ Xe ALUs on contiguous GEMM tiles.
-        let matmul_vec_width = if matches!(generation, IntelGeneration::Gen12Plus) {
-            8
-        } else {
-            crate::wgsl::MATMUL_VEC_WIDTH
-        };
+        // VEC=4 (one vec4 dot per inner step) beats VEC=8 on Iris Xe: fewer registers,
+        // less loop overhead inside tile_dot_vec vs wider unroll.
+        let matmul_vec_width = crate::wgsl::MATMUL_VEC_WIDTH;
 
         Self {
             generation,

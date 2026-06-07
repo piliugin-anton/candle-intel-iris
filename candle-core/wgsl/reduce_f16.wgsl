@@ -9,9 +9,10 @@
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_sum_f16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -20,10 +21,14 @@ fn reduce_sum_f16(
     let tid = local_id.x;
 
     var acc = f16(0.0);
-    var chunk_off = tid;
-    while (chunk_off < chunk) {
-        acc += reduce_load_src(dst_id, chunk_off);
-        chunk_off += REDUCE_WG_SIZE;
+    if (reduce_dim_is_inner_contiguous()) {
+        acc = reduce_sum_inner_contiguous(dst_id, chunk, tid);
+    } else {
+        var chunk_off = tid;
+        while (chunk_off < chunk) {
+            acc += reduce_load_src(dst_id, chunk_off);
+            chunk_off += REDUCE_WG_SIZE;
+        }
     }
     wg_sum[tid] = acc;
     workgroup_reduce_sum(tid);
@@ -36,9 +41,10 @@ fn reduce_sum_f16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_mean_f16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -47,10 +53,14 @@ fn reduce_mean_f16(
     let tid = local_id.x;
 
     var acc = f16(0.0);
-    var chunk_off = tid;
-    while (chunk_off < chunk) {
-        acc += reduce_load_src(dst_id, chunk_off);
-        chunk_off += REDUCE_WG_SIZE;
+    if (reduce_dim_is_inner_contiguous()) {
+        acc = reduce_sum_inner_contiguous(dst_id, chunk, tid);
+    } else {
+        var chunk_off = tid;
+        while (chunk_off < chunk) {
+            acc += reduce_load_src(dst_id, chunk_off);
+            chunk_off += REDUCE_WG_SIZE;
+        }
     }
     wg_sum[tid] = acc;
     workgroup_reduce_sum(tid);
@@ -64,9 +74,10 @@ fn reduce_mean_f16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_max_f16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -91,9 +102,10 @@ fn reduce_max_f16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_min_f16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -119,9 +131,10 @@ fn reduce_min_f16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_argmax_f16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }
@@ -157,9 +170,10 @@ fn reduce_argmax_f16(
 @compute @workgroup_size(REDUCE_WG_SIZE)
 fn reduce_argmin_f16(
     @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
 ) {
-    let dst_id = wg_id.x;
+    let dst_id = reduce_dst_id(wg_id, num_wg);
     if (dst_id >= reduce_params.dst_elem_count) {
         return;
     }

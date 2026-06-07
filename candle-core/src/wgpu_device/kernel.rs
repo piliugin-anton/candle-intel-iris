@@ -384,6 +384,24 @@ pub(crate) fn elemwise_workgroup_count(device: &WgpuDevice, elem_count: usize) -
     workgroup_count(device.caps().elem_workgroup_size, elem_count)
 }
 
+/// Dispatch grid for kernels that launch one workgroup per output element.
+pub(crate) fn per_elem_dispatch_grid(elem_count: usize) -> [u32; 3] {
+    let mut n = elem_count as u64;
+    if n == 0 {
+        return [0, 0, 0];
+    }
+    let mut grid = [1u32; 3];
+    for i in 0..3 {
+        if n <= MAX_DISPATCH_WORKGROUPS as u64 {
+            grid[i] = n as u32;
+            return grid;
+        }
+        grid[i] = MAX_DISPATCH_WORKGROUPS;
+        n = n.div_ceil(MAX_DISPATCH_WORKGROUPS as u64);
+    }
+    grid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +418,12 @@ mod tests {
     fn workgroup_count_caps_at_max_dispatch() {
         let huge = MAX_DISPATCH_WORKGROUPS as usize * 8 + 1;
         assert_eq!(workgroup_count(8, huge), MAX_DISPATCH_WORKGROUPS);
+    }
+
+    #[test]
+    fn per_elem_dispatch_grid_splits_large_outputs() {
+        assert_eq!(per_elem_dispatch_grid(0), [0, 0, 0]);
+        assert_eq!(per_elem_dispatch_grid(1024), [1024, 1, 1]);
+        assert_eq!(per_elem_dispatch_grid(1_048_576), [65535, 17, 1]);
     }
 }

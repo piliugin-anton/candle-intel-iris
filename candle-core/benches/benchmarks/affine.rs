@@ -38,7 +38,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         run_affine_benchmark(c, &device, DType::F32, "affine_f32");
         run_affine_benchmark(c, &device, DType::F16, "affine_f16");
         run_affine_benchmark(c, &device, DType::BF16, "affine_bf16");
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", feature = "wgpu")))]
         run_affine_benchmark(c, &device, DType::F8E4M3, "affine_fp8");
     }
 }

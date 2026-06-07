@@ -68,8 +68,8 @@ fn matmul_tiled_f16(
 
         workgroupBarrier();
 
-        for (var k = 0u; k < TILE; k = k + 1u) {
-            acc = fma(f32(tile_a[ty * TILE + k]), f32(tile_b[k * TILE + tx]), acc);
+        for (var k = 0u; k < TILE; k = k + VEC) {
+            acc += tile_dot_vec_f16(ty, tx, k);
         }
 
         workgroupBarrier();

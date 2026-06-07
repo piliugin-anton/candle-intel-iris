@@ -59,8 +59,69 @@ fn reduce_src_index(dst_id: u32, chunk_offset: u32) -> u32 {
     return src_idx;
 }
 
+fn is_contiguous(tensor_layout: TensorLayout) -> bool {
+    var acc = 1u;
+    let num_dims = tensor_layout.num_dims;
+    for (var d = 0u; d < num_dims; d = d + 1u) {
+        let dim_idx = num_dims - 1u - d;
+        let dim = tensor_layout.dims[dim_idx];
+        if (dim > 1u && acc != tensor_layout.strides[dim_idx]) {
+            return false;
+        }
+        acc *= dim;
+    }
+    return true;
+}
+
+fn reduce_dim_is_inner_contiguous() -> bool {
+    let src = reduce_params.src_layout;
+    let dim = reduce_params._pad0;
+    if (!is_contiguous(src)) {
+        return false;
+    }
+    if (dim + 1u != src.num_dims) {
+        return false;
+    }
+    return src.strides[dim] == 1u;
+}
+
+fn reduce_src_base(dst_id: u32) -> u32 {
+    return reduce_src_index(dst_id, 0u);
+}
+
+fn reduce_sum_inner_contiguous(dst_id: u32, chunk: u32, tid: u32) -> f32 {
+    let base = reduce_src_base(dst_id);
+    var acc = 0.0;
+    var chunk_off = tid * 4u;
+    let chunk_vec = (chunk / 4u) * 4u;
+    while (chunk_off < chunk_vec) {
+        let off = base + chunk_off;
+        let v = vec4<f32>(
+            reduce_in[off],
+            reduce_in[off + 1u],
+            reduce_in[off + 2u],
+            reduce_in[off + 3u],
+        );
+        acc += v.x + v.y + v.z + v.w;
+        chunk_off += REDUCE_WG_SIZE * 4u;
+    }
+    while (chunk_off < chunk) {
+        acc += reduce_in[base + chunk_off];
+        chunk_off += REDUCE_WG_SIZE;
+    }
+    return acc;
+}
+
 fn reduce_load_src(dst_id: u32, chunk_offset: u32) -> f32 {
+    if (reduce_dim_is_inner_contiguous()) {
+        return reduce_in[reduce_src_base(dst_id) + chunk_offset];
+    }
     return reduce_in[reduce_src_index(dst_id, chunk_offset)];
+}
+
+// Flat workgroup index when dispatch is split across grid axes (max 65535 per dim).
+fn reduce_dst_id(wg_id: vec3<u32>, num_wg: vec3<u32>) -> u32 {
+    return wg_id.x + wg_id.y * num_wg.x + wg_id.z * num_wg.x * num_wg.y;
 }
 
 // Tree reduction in workgroup shared memory.

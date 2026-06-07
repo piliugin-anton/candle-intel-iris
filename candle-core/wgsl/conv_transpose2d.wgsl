@@ -2,6 +2,8 @@
 
 const MAX_DIMS: u32 = 8u;
 
+const WG_SIZE: u32 = 32u;
+
 struct TensorLayout {
     dims: array<u32, MAX_DIMS>,
     strides: array<u32, MAX_DIMS>,
@@ -36,12 +38,12 @@ var<storage, read> kernel_buf: array<f32>;
 @group(0) @binding(4)
 var<storage, read> params: ConvTranspose2dParams;
 
-@compute @workgroup_size(32)
+@compute @workgroup_size(WG_SIZE)
 fn conv_transpose2d_f32(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let stride_wg = 32u * num_wg.x;
+    let stride_wg = WG_SIZE * num_wg.x;
     let p = params;
     let in_layout = p.src_layout;
     let k_layout = p.kernel_layout;

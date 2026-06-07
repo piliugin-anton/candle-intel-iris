@@ -4,11 +4,10 @@ use criterion::{criterion_group, Criterion, Throughput};
 use std::hint::black_box;
 use std::time::Instant;
 
-fn run(lhs: &Tensor, rhs: &Tensor) -> Tensor {
-    lhs.mul(rhs).unwrap()
-}
-
-fn run_binary_benchmark(c: &mut Criterion, device: &Device, dtype: DType, name: &str) {
+fn run_binary_benchmark<F>(c: &mut Criterion, device: &Device, dtype: DType, name: &str, op: F)
+where
+    F: Fn(&Tensor, &Tensor) + Copy,
+{
     let b = 1;
     let m = 1024;
     let k = 1024;
@@ -35,7 +34,7 @@ fn run_binary_benchmark(c: &mut Criterion, device: &Device, dtype: DType, name: 
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _i in 0..iters {
-                run(black_box(&lhs), black_box(&rhs));
+                op(black_box(&lhs), black_box(&rhs));
             }
             device.sync().unwrap();
             start.elapsed()
@@ -48,8 +47,16 @@ fn criterion_benchmark(c: &mut Criterion) {
     let handler = BenchDeviceHandler::new().unwrap();
     for device in handler.devices {
         for dtype in [DType::F32, DType::BF16, DType::F16] {
-            let name = format!("binary_mul_{dtype:?}");
-            run_binary_benchmark(c, &device, dtype, &name);
+            let dt = format!("{dtype:?}");
+            run_binary_benchmark(c, &device, dtype, &format!("binary_add_{dt}"), |l, r| {
+                l.add(r).unwrap();
+            });
+            run_binary_benchmark(c, &device, dtype, &format!("binary_mul_{dt}"), |l, r| {
+                l.mul(r).unwrap();
+            });
+            run_binary_benchmark(c, &device, dtype, &format!("binary_sub_{dt}"), |l, r| {
+                l.sub(r).unwrap();
+            });
         }
     }
 }
