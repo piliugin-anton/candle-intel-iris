@@ -7,6 +7,19 @@ const VEC: u32 = 4u;
 
 var<workgroup> tile_a: array<f32, 256>;
 var<workgroup> tile_b: array<f32, 256>;
+var<workgroup> out_tile: array<f32, 256>;
+
+fn f32_to_bf16_bits(value: f32) -> u32 {
+    return (bitcast<u32>(value) >> 16u) & 0xFFFFu;
+}
+
+fn store_bf16_pair_at(batch: u32, row: u32, col: u32, v0: f32, v1: f32) {
+    let elem0 = mm_elem_index(mm_params.c_layout, batch, row, col);
+    let word = elem0 / 2u;
+    let lo = f32_to_bf16_bits(v0);
+    let hi = f32_to_bf16_bits(v1);
+    atomicStore(&c_buf[word], lo | (hi << 16u));
+}
 
 fn tile_dot_vec_bf16(ty: u32, tx: u32, k_base: u32) -> f32 {
     var acc = 0.0;
@@ -75,8 +88,17 @@ fn matmul_tiled_bf16acc(
         workgroupBarrier();
     }
 
-    if (row < m && col < n) {
-        mm_store_c(batch, row, col, acc);
+    out_tile[ty * TILE + tx] = acc;
+    workgroupBarrier();
+
+    if (row < m && col < n && (tx % 2u) == 0u) {
+        let v0 = out_tile[ty * TILE + tx];
+        if (col + 1u < n) {
+            let v1 = out_tile[ty * TILE + tx + 1u];
+            store_bf16_pair_at(batch, row, col, v0, v1);
+        } else {
+            write_bf16_c(mm_elem_index(mm_params.c_layout, batch, row, col), v0);
+        }
     }
 }
 
@@ -125,7 +147,16 @@ fn matmul_tiled_vec_bf16acc(
         workgroupBarrier();
     }
 
-    if (row < m && col < n) {
-        mm_store_c(batch, row, col, acc);
+    out_tile[ty * TILE + tx] = acc;
+    workgroupBarrier();
+
+    if (row < m && col < n && (tx % 2u) == 0u) {
+        let v0 = out_tile[ty * TILE + tx];
+        if (col + 1u < n) {
+            let v1 = out_tile[ty * TILE + tx + 1u];
+            store_bf16_pair_at(batch, row, col, v0, v1);
+        } else {
+            write_bf16_c(mm_elem_index(mm_params.c_layout, batch, row, col), v0);
+        }
     }
 }

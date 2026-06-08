@@ -78,3 +78,11 @@ required-features = ["cuda"]
 [[example]]
 name = "wgpu_bench"
 required-features = ["wgpu"]
+
+[[example]]
+name = "wgpu_perf_compare"
+required-features = ["wgpu"]
+
+[[example]]
+name = "wgpu_conv_bench"
+required-features = ["wgpu"]

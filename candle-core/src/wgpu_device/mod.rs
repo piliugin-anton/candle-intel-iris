@@ -200,6 +200,11 @@ impl WgpuDevice {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_caps_for_test(&mut self, caps: IntelCaps) {
+        self.caps = caps;
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_test(integrated: bool, uma_threshold: usize) -> Self {
         let (wgpu_device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor {
             label: None,

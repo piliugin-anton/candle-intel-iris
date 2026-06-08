@@ -18,7 +18,8 @@ use crate::wgsl::{
     BINARY, BINARY_BF16, BINARY_F16, BINARY_I32, BINARY_U32, CAST, CMP, CMP_BF16, CMP_F16, COPY,
     COPY2D, COPY2D_BF16,
     COPY2D_F16, COPY2D_U8, COPY_BF16, COPY_F16, COPY_U32, DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0,
-    DEQUANT_Q8_0, LAYER_NORM, LAYER_NORM_BF16, LAYER_NORM_F16, MATMUL_GEMV, MATMUL_NAIVE,
+    DEQUANT_Q8_0, LAYER_NORM, LAYER_NORM_BF16, LAYER_NORM_F16, MATMUL_GEMV,
+    MATMUL_GEMV_BF16ACC, MATMUL_GEMV_F16, MATMUL_GEMV_F16ACC, MATMUL_NAIVE,
     MATMUL_TILED,
     MATMUL_TILED_BF16, MATMUL_TILED_BF16ACC, MATMUL_TILED_F16, MATMUL_TILED_F16ACC,
     MATMUL_TILED_VEC, QMATMUL_Q4_0, QMATMUL_Q4_0_F16, QMATMUL_Q4_K,
@@ -102,6 +103,12 @@ fn require_matmul_dtype(dtype: DType, op: &'static str) -> CandleResult<()> {
 enum MatMulKernel {
     GemvF32,
     GemvColF32,
+    GemvF16,
+    GemvColF16,
+    GemvF16AccF32,
+    GemvColF16AccF32,
+    GemvBf16AccF32,
+    GemvColBf16AccF32,
     NaiveF32,
     TiledF32,
     TiledVecF32,
@@ -136,6 +143,27 @@ fn select_matmul_kernel(
         && m >= tile
         && (n >= tile || m >= tile * 4);
 
+    // Thin M/N (batch-1 GEMV, attention projections) must not use 16×16 tiled kernels:
+    // they launch ~16× more threads than a dedicated GEMV path.
+    if m == 1 {
+        return match (storage_dtype, compute_dtype) {
+            (DType::F16, DType::F16) if caps.supports_native_f16() => MatMulKernel::GemvF16,
+            (DType::F16, DType::F32) if caps.supports_shader_f16 => MatMulKernel::GemvF16AccF32,
+            (DType::BF16, _) => MatMulKernel::GemvBf16AccF32,
+            _ => MatMulKernel::GemvF32,
+        };
+    }
+    if n == 1 {
+        return match (storage_dtype, compute_dtype) {
+            (DType::F16, DType::F16) if caps.supports_native_f16() => MatMulKernel::GemvColF16,
+            (DType::F16, DType::F32) if caps.supports_shader_f16 => {
+                MatMulKernel::GemvColF16AccF32
+            }
+            (DType::BF16, _) => MatMulKernel::GemvColBf16AccF32,
+            _ => MatMulKernel::GemvColF32,
+        };
+    }
+
     match (storage_dtype, compute_dtype) {
         (DType::F16, DType::F32) if caps.supports_shader_f16 => {
             if use_tiled && vec_aligned {
@@ -151,15 +179,7 @@ fn select_matmul_kernel(
                 MatMulKernel::TiledF16
             }
         }
-        (DType::BF16, DType::F32) => {
-            if use_tiled && vec_aligned {
-                MatMulKernel::TiledVecBf16AccF32
-            } else {
-                MatMulKernel::TiledBf16AccF32
-            }
-        }
-        (DType::BF16, DType::BF16) if caps.supports_native_bf16() => {
-            // F32 accumulation from packed bf16 loads beats native bf16 tile math on Iris Xe.
+        (DType::BF16, DType::F32) | (DType::BF16, DType::BF16) => {
             if use_tiled && vec_aligned {
                 MatMulKernel::TiledVecBf16AccF32
             } else {
@@ -171,10 +191,6 @@ fn select_matmul_kernel(
                 MatMulKernel::TiledVecF32
             } else if use_tiled {
                 MatMulKernel::TiledF32
-            } else if m == 1 {
-                MatMulKernel::GemvF32
-            } else if n == 1 {
-                MatMulKernel::GemvColF32
             } else {
                 MatMulKernel::NaiveF32
             }
@@ -190,13 +206,21 @@ fn matmul_dispatch_grid(
     n: usize,
 ) -> [u32; 3] {
     match kernel {
-        MatMulKernel::GemvF32 => {
+        MatMulKernel::GemvF32 | MatMulKernel::GemvF16 | MatMulKernel::GemvF16AccF32 => {
             let wg = device.caps().elem_workgroup_size;
             [workgroup_count(wg, n), 1, b as u32]
         }
-        MatMulKernel::GemvColF32 => {
+        MatMulKernel::GemvBf16AccF32 => {
+            let wg = device.caps().elem_workgroup_size;
+            [workgroup_count(wg, n.div_ceil(2)), 1, b as u32]
+        }
+        MatMulKernel::GemvColF32 | MatMulKernel::GemvColF16 | MatMulKernel::GemvColF16AccF32 => {
             let wg = device.caps().elem_workgroup_size;
             [workgroup_count(wg, m), 1, b as u32]
+        }
+        MatMulKernel::GemvColBf16AccF32 => {
+            let wg = device.caps().elem_workgroup_size;
+            [workgroup_count(wg, m.div_ceil(2)), 1, b as u32]
         }
         _ => {
             let wg = device.caps().matmul_tile_size;
@@ -208,6 +232,9 @@ fn matmul_dispatch_grid(
 fn matmul_shader_source(kernel: MatMulKernel) -> &'static str {
     match kernel {
         MatMulKernel::GemvF32 | MatMulKernel::GemvColF32 => MATMUL_GEMV,
+        MatMulKernel::GemvF16 | MatMulKernel::GemvColF16 => MATMUL_GEMV_F16,
+        MatMulKernel::GemvF16AccF32 | MatMulKernel::GemvColF16AccF32 => MATMUL_GEMV_F16ACC,
+        MatMulKernel::GemvBf16AccF32 | MatMulKernel::GemvColBf16AccF32 => MATMUL_GEMV_BF16ACC,
         MatMulKernel::NaiveF32 => MATMUL_NAIVE,
         MatMulKernel::TiledF32 => MATMUL_TILED,
         MatMulKernel::TiledVecF32 => MATMUL_TILED_VEC,
@@ -222,6 +249,12 @@ fn matmul_entry_point(kernel: MatMulKernel) -> &'static str {
     match kernel {
         MatMulKernel::GemvF32 => "matmul_gemv_f32",
         MatMulKernel::GemvColF32 => "matmul_gemv_col_f32",
+        MatMulKernel::GemvF16 => "matmul_gemv_f16",
+        MatMulKernel::GemvColF16 => "matmul_gemv_col_f16",
+        MatMulKernel::GemvF16AccF32 => "matmul_gemv_f16acc",
+        MatMulKernel::GemvColF16AccF32 => "matmul_gemv_col_f16acc",
+        MatMulKernel::GemvBf16AccF32 => "matmul_gemv_bf16acc",
+        MatMulKernel::GemvColBf16AccF32 => "matmul_gemv_col_bf16acc",
         MatMulKernel::NaiveF32 => "matmul_naive_f32",
         MatMulKernel::TiledF32 => "matmul_tiled_f32",
         MatMulKernel::TiledVecF32 => "matmul_tiled_vec_f32",
@@ -546,7 +579,14 @@ fn compile_matmul_kernel(device: &WgpuDevice, kernel: MatMulKernel) -> Result<Wg
     let entry = matmul_entry_point(kernel);
     let caps = device.caps();
     let (tuned, wg) = match kernel {
-        MatMulKernel::GemvF32 | MatMulKernel::GemvColF32 => {
+        MatMulKernel::GemvF32
+        | MatMulKernel::GemvColF32
+        | MatMulKernel::GemvF16
+        | MatMulKernel::GemvColF16
+        | MatMulKernel::GemvF16AccF32
+        | MatMulKernel::GemvColF16AccF32
+        | MatMulKernel::GemvBf16AccF32
+        | MatMulKernel::GemvColBf16AccF32 => {
             let tuned = tune_matmul_shader_source(
                 &super::intel_caps::tune_shader_source(source, caps),
                 caps,
@@ -2978,7 +3018,45 @@ mod tests {
     }
 
     #[test]
+    fn select_matmul_prefers_gemv_for_thin_m_or_n() {
+        let mut device = super::super::WgpuDevice::new_test(true, 1024);
+        device.set_caps_for_test(super::super::IntelCaps {
+            generation: super::super::IntelGeneration::Gen12Plus,
+            supports_shader_f16: true,
+            ..device.caps().clone()
+        });
+        assert_eq!(
+            select_matmul_kernel(&device, DType::F16, 1, 4096, 4096),
+            MatMulKernel::GemvF16
+        );
+        assert_eq!(
+            select_matmul_kernel(&device, DType::BF16, 1, 4096, 4096),
+            MatMulKernel::GemvBf16AccF32
+        );
+        assert_eq!(
+            select_matmul_kernel(&device, DType::F32, 1, 4096, 4096),
+            MatMulKernel::GemvF32
+        );
+        assert_eq!(
+            select_matmul_kernel(&device, DType::F16, 4096, 1, 4096),
+            MatMulKernel::GemvColF16
+        );
+        assert_eq!(
+            select_matmul_kernel(&device, DType::F16, 64, 64, 64),
+            MatMulKernel::TiledVecF16
+        );
+    }
+
+    #[test]
     fn matmul_entry_points() {
+        assert_eq!(
+            matmul_entry_point(MatMulKernel::GemvF16),
+            "matmul_gemv_f16"
+        );
+        assert_eq!(
+            matmul_entry_point(MatMulKernel::GemvBf16AccF32),
+            "matmul_gemv_bf16acc"
+        );
         assert_eq!(
             matmul_entry_point(MatMulKernel::TiledVecF32),
             "matmul_tiled_vec_f32"

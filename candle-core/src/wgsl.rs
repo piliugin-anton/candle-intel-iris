@@ -65,6 +65,19 @@ pub const MATMUL_GEMV: &str = concat!(
     include_str!("../wgsl/matmul_common.wgsl"),
     include_str!("../wgsl/matmul_gemv.wgsl")
 );
+pub const MATMUL_GEMV_F16: &str = concat!(
+    include_str!("../wgsl/matmul_common_f16.wgsl"),
+    include_str!("../wgsl/matmul_gemv_f16.wgsl")
+);
+pub const MATMUL_GEMV_F16ACC: &str = concat!(
+    include_str!("../wgsl/matmul_common_f16acc.wgsl"),
+    include_str!("../wgsl/matmul_gemv_f16acc.wgsl")
+);
+pub const MATMUL_GEMV_BF16ACC: &str = concat!(
+    include_str!("../wgsl/matmul_common_bf16acc.wgsl"),
+    include_str!("../wgsl/matmul_gemv.wgsl"),
+    include_str!("../wgsl/matmul_gemv_bf16acc.wgsl")
+);
 pub const MATMUL_TILED: &str = concat!(
     include_str!("../wgsl/matmul_common.wgsl"),
     include_str!("../wgsl/matmul_tiled.wgsl")
