@@ -192,6 +192,7 @@ pub const CAST: &str = include_str!("../wgsl/cast.wgsl");
 pub const COPY2D: &str = include_str!("../wgsl/copy2d.wgsl");
 pub const COPY2D_F16: &str = include_str!("../wgsl/copy2d_f16.wgsl");
 pub const COPY2D_BF16: &str = include_str!("../wgsl/copy2d_bf16.wgsl");
+pub const COPY2D_U8: &str = include_str!("../wgsl/copy2d_u8.wgsl");
 pub const RMS_NORM: &str = include_str!("../wgsl/rms_norm.wgsl");
 pub const RMS_NORM_F16: &str = include_str!("../wgsl/rms_norm_f16.wgsl");
 pub const RMS_NORM_BF16: &str = include_str!("../wgsl/rms_norm_bf16.wgsl");
@@ -344,6 +345,7 @@ mod tests {
         assert!(POOL2D_BF16.contains("fn avg_pool2d_bf16"));
         assert!(COPY2D_F16.contains("fn copy2d_f16"));
         assert!(COPY2D_BF16.contains("fn copy2d_bf16"));
+        assert!(COPY2D_U8.contains("fn copy2d_u8"));
         assert!(POOL2D.contains("fn max_pool2d_f32"));
         assert!(UPSAMPLE_NEAREST1D.contains("fn upsample_nearest1d_f32"));
         assert!(UPSAMPLE_NEAREST2D.contains("fn upsample_nearest2d_f32"));

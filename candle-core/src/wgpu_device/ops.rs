@@ -7,7 +7,8 @@ use super::error::{Result, WgpuError};
 use super::intel_caps::{tune_matmul_shader_source, IntelGeneration};
 use super::kernel::{elemwise_workgroup_count, per_elem_dispatch_grid, workgroup_count, WgpuKernel};
 use super::storage::{
-    buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE,
+    buffer_offset, copy_buffer_region, BufferBacking, BufferOffset, WgpuStorage,
+    STORAGE_BUFFER_USAGE,
 };
 use super::WgpuDevice;
 use crate::backend::BackendStorage;
@@ -16,7 +17,7 @@ use crate::quantized::GgmlDType;
 use crate::wgsl::{
     BINARY, BINARY_BF16, BINARY_F16, BINARY_I32, BINARY_U32, CAST, CMP, CMP_BF16, CMP_F16, COPY,
     COPY2D, COPY2D_BF16,
-    COPY2D_F16, COPY_BF16, COPY_F16, COPY_U32, DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0,
+    COPY2D_F16, COPY2D_U8, COPY_BF16, COPY_F16, COPY_U32, DEQUANT_Q4_0, DEQUANT_Q4_K, DEQUANT_Q5_0,
     DEQUANT_Q8_0, LAYER_NORM, LAYER_NORM_BF16, LAYER_NORM_F16, MATMUL_GEMV, MATMUL_NAIVE,
     MATMUL_TILED,
     MATMUL_TILED_BF16, MATMUL_TILED_BF16ACC, MATMUL_TILED_F16, MATMUL_TILED_F16ACC,
@@ -67,7 +68,17 @@ fn copy2d_shader_source(dtype: DType) -> &'static str {
     match dtype {
         DType::F16 => COPY2D_F16,
         DType::BF16 => COPY2D_BF16,
+        DType::U8 => COPY2D_U8,
         _ => COPY2D,
+    }
+}
+
+fn copy2d_entry_point(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F16 => "copy2d_f16",
+        DType::BF16 => "copy2d_bf16",
+        DType::U8 => "copy2d_u8",
+        _ => "copy2d_f32",
     }
 }
 
@@ -1917,6 +1928,85 @@ pub struct Copy2dParams {
     pub dst_offset: usize,
 }
 
+fn copy2d_region_bytes(dtype: DType, params: &Copy2dParams) -> (u64, u64, u64) {
+    let bpe = dtype.size_in_bytes() as u64;
+    (
+        params.src_offset as u64 * bpe,
+        params.dst_offset as u64 * bpe,
+        (params.d1 * params.d2) as u64 * bpe,
+    )
+}
+
+fn copy2d_shader_parallel_elems(params: &Copy2dParams, dtype: DType) -> usize {
+    if dtype == DType::U8 && params.d1 == 1 {
+        return params.d2;
+    }
+    params.d1 * params.d2
+}
+
+fn try_copy2d_blit(src: &WgpuStorage, dst: &WgpuStorage, params: &Copy2dParams) -> Result<bool> {
+    if params.src_stride != params.d2 || params.dst_stride != params.d2 {
+        return Ok(false);
+    }
+    let el_count = params.d1 * params.d2;
+    if el_count == 0 {
+        return Ok(true);
+    }
+    let (src_off, dst_off, size) = copy2d_region_bytes(src.dtype(), params);
+    const ALIGN: u64 = wgpu::COPY_BUFFER_ALIGNMENT;
+    if src_off % ALIGN != 0 || dst_off % ALIGN != 0 || size % ALIGN != 0 {
+        return Ok(false);
+    }
+    copy_buffer_region(
+        src.device(),
+        src.backing(),
+        dst.backing(),
+        src_off,
+        dst_off,
+        size,
+    )?;
+    Ok(true)
+}
+
+fn dispatch_copy2d_shader(
+    src: &WgpuStorage,
+    dst: &mut WgpuStorage,
+    params: Copy2dParams,
+    compute_dtype: DType,
+) -> Result<()> {
+    let device = src.device();
+    let uniforms = Copy2dUniforms {
+        d1: params.d1 as u32,
+        d2: params.d2 as u32,
+        src_stride: params.src_stride as u32,
+        dst_stride: params.dst_stride as u32,
+        src_offset: params.src_offset as u32,
+        dst_offset: params.dst_offset as u32,
+        _pad: [0; 66],
+    };
+    let entry = copy2d_entry_point(compute_dtype);
+    let kernel = WgpuKernel::compile_with_workgroup_size(
+        device,
+        copy2d_shader_source(compute_dtype),
+        entry,
+        device.caps().elem_workgroup_size,
+    )?;
+    let dummy = Layout::contiguous((1,));
+    let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
+        device.device(),
+        device.queue(),
+        buffer_offset(dst, &dummy),
+        buffer_offset(src, &dummy),
+        None,
+        uniforms.as_bytes(),
+    )?;
+    let parallel_elems = copy2d_shader_parallel_elems(&params, compute_dtype);
+    let grid = elemwise_workgroup_count(device, parallel_elems);
+    dst.backing()
+        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;
+    Ok(())
+}
+
 pub fn dispatch_copy2d(
     src: &WgpuStorage,
     dst: &mut WgpuStorage,
@@ -1928,6 +2018,14 @@ pub fn dispatch_copy2d(
         ));
     }
     let dtype = src.dtype();
+    // Buffer blit wins for large float copies; on Intel U8 cat it loses to a tuned
+    // compute kernel because each tensor chunk is submitted separately.
+    if dtype != DType::U8 && try_copy2d_blit(src, dst, &params)? {
+        return Ok(());
+    }
+    if dtype == DType::U8 {
+        return dispatch_copy2d_shader(src, dst, params, DType::U8);
+    }
     require_float(dtype, "copy2d").map_err(|e| WgpuError::Message(e.to_string()))?;
     let device = src.device();
     let compute_dtype = if device.caps().has_gpu_kernels_for(dtype) {
@@ -1951,36 +2049,7 @@ pub fn dispatch_copy2d(
         *dst = out;
         return Ok(());
     }
-    let uniforms = Copy2dUniforms {
-        d1: params.d1 as u32,
-        d2: params.d2 as u32,
-        src_stride: params.src_stride as u32,
-        dst_stride: params.dst_stride as u32,
-        src_offset: params.src_offset as u32,
-        dst_offset: params.dst_offset as u32,
-        _pad: [0; 66],
-    };
-    let entry = format!("copy2d_{}", float_type_suffix(compute_dtype));
-    let kernel = WgpuKernel::compile_with_workgroup_size(
-        device,
-        copy2d_shader_source(compute_dtype),
-        &entry,
-        device.caps().elem_workgroup_size,
-    )?;
-    let dummy = Layout::contiguous((1,));
-    let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
-        device.device(),
-        device.queue(),
-        buffer_offset(dst, &dummy),
-        buffer_offset(src, &dummy),
-        None,
-        uniforms.as_bytes(),
-    )?;
-    let total = params.d1 * params.d2;
-    let grid = elemwise_workgroup_count(device, total);
-    dst.backing()
-        .with_unmapped(|| kernel.dispatch_bind_group(device, &bind_group, [grid, 1, 1]))?;
-    Ok(())
+    dispatch_copy2d_shader(src, dst, params, compute_dtype)
 }
 
 fn rms_norm_shader(dtype: DType) -> (&'static str, &'static str) {
@@ -2998,6 +3067,26 @@ mod tests {
     }
 
     #[test]
+    fn copy2d_u8_cat_matches_cpu() -> CandleResult<()> {
+        use crate::{Device, Tensor};
+
+        let cpu = Device::Cpu;
+        let gpu = Device::new_wgpu()?;
+        let a = Tensor::new(vec![1u8, 2, 3, 4, 5, 6, 7, 8], &cpu)?;
+        let b = Tensor::new(vec![9u8, 10, 11, 12, 13, 14, 15, 16], &cpu)?;
+        let cpu_cat = Tensor::cat(&[a.clone(), b.clone()], 0)?;
+        let gpu_cat = Tensor::cat(
+            &[a.to_device(&gpu)?, b.to_device(&gpu)?],
+            0,
+        )?;
+        assert_eq!(
+            cpu_cat.to_vec1::<u8>()?,
+            gpu_cat.to_vec1::<u8>()?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn p1_shaders_compile_on_noop_device() {
         let device = super::super::WgpuDevice::new_test(true, 1024);
         compile_qmatmul_kernel(&device, QMATMUL_Q8_0, "qmatmul_q8_0_f32").unwrap();
@@ -3071,6 +3160,7 @@ mod tests {
         WgpuKernel::compile_with_workgroup_size(&device, CAST, "cast_f32_f16", 32).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, CAST, "cast_f16_f32", 32).unwrap();
         WgpuKernel::compile_with_workgroup_size(&device, COPY2D_BF16, "copy2d_bf16", 32).unwrap();
+        WgpuKernel::compile_with_workgroup_size(&device, COPY2D_U8, "copy2d_u8", 32).unwrap();
         compile_reduce_kernel(&device, DType::BF16, "reduce_sum_bf16").unwrap();
         WgpuKernel::compile_with_workgroup_size(
             &device,

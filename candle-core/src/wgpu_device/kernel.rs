@@ -1,4 +1,4 @@
-use super::async_io::poll_device;
+use super::async_io::poll_device_progress;
 use super::bind_group::{
     BindGroupBuilder, ExtendedBindGroupArgs, ExtendedBindGroupBuilder, KernelUniforms,
     SdpaBindGroupArgs, SdpaBindGroupBuilder, StandardBindGroupArgs, StandardBindGroupLayout,
@@ -261,7 +261,7 @@ impl WgpuKernel {
             });
         self.encode_dispatch(device.device(), device.queue(), &mut encoder, args)?;
         device.queue().submit(Some(encoder.finish()));
-        poll_device(device.device())?;
+        poll_device_progress(device.device())?;
         Ok(())
     }
 
@@ -347,7 +347,7 @@ impl WgpuKernel {
             });
         self.encode_dispatch_bind_group(&mut encoder, bind_group, workgroups);
         device.queue().submit(Some(encoder.finish()));
-        poll_device(device.device())?;
+        poll_device_progress(device.device())?;
         Ok(())
     }
 }

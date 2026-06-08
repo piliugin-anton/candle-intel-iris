@@ -272,7 +272,42 @@ impl WgpuStorage {
     }
 }
 
+/// GPU buffer-to-buffer copy for contiguous regions (requires 4-byte alignment).
+pub(crate) fn copy_buffer_region(
+    device: &WgpuDevice,
+    src: &BufferBacking,
+    dst: &BufferBacking,
+    src_offset: u64,
+    dst_offset: u64,
+    size: u64,
+) -> Result<()> {
+    const ALIGN: u64 = wgpu::COPY_BUFFER_ALIGNMENT;
+    if src_offset % ALIGN != 0 || dst_offset % ALIGN != 0 || size % ALIGN != 0 {
+        return Err(WgpuError::Message(format!(
+            "copy_buffer_region requires {ALIGN}-byte alignment (src={src_offset}, dst={dst_offset}, size={size})"
+        )));
+    }
+    src.with_unmapped(|| {
+        dst.with_unmapped(|| {
+            let mut encoder = device.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wgpu copy_buffer_region"),
+            });
+            encoder.copy_buffer_to_buffer(
+                src.buffer(),
+                src_offset,
+                dst.buffer(),
+                dst_offset,
+                size,
+            );
+            device.queue().submit(Some(encoder.finish()));
+            Ok(())
+        })?;
+        Ok(())
+    })
+}
+
 fn read_bytes_staging(device: &WgpuDevice, src: &wgpu::Buffer, size: u64) -> Result<Vec<u8>> {
+    super::async_io::poll_device(device.device())?;
     let wgpu_device = device.device();
     let queue = device.queue();
 

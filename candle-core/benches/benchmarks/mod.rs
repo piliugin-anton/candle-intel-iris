@@ -7,6 +7,7 @@ pub(crate) mod contiguous;
 pub(crate) mod conv2d;
 pub(crate) mod conv_transpose2d;
 pub(crate) mod copy;
+pub(crate) mod copy2d_u8;
 pub(crate) mod indexing;
 pub(crate) mod matmul;
 pub(crate) mod nn_kernels;

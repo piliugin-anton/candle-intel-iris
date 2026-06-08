@@ -14,7 +14,15 @@ pub fn wait_for_buffer_map(
     }
 }
 
-/// Poll the device, propagating [`wgpu::PollError`] as [`WgpuError::Poll`].
+/// Non-blocking poll after queue submit — lets the driver batch work across ops.
+pub fn poll_device_progress(device: &wgpu::Device) -> Result<()> {
+    device
+        .poll(wgpu::PollType::Poll)
+        .map_err(WgpuError::from)?;
+    Ok(())
+}
+
+/// Block until all in-flight queue work completes.
 pub fn poll_device(device: &wgpu::Device) -> Result<()> {
     device
         .poll(wgpu::PollType::wait_indefinitely())
