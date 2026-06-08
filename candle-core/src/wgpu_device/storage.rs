@@ -230,11 +230,13 @@ impl WgpuStorage {
         Ok(out)
     }
 
-    fn cast_via_cpu(&self, _layout: &Layout, dtype: DType) -> Result<Self> {
+    fn cast_via_cpu(&self, layout: &Layout, dtype: DType) -> Result<Self> {
         let cpu = self
             .to_cpu_storage()
             .map_err(|e| WgpuError::Message(e.to_string()))?;
-        let casted = cast_cpu_storage(&cpu, dtype)?;
+        let casted = cpu
+            .to_dtype(layout, dtype)
+            .map_err(|e| WgpuError::Message(e.to_string()))?;
         Self::from_cpu(&self.device, &casted)
     }
 
@@ -335,45 +337,6 @@ fn cast_entry_point(from: DType, to: DType) -> Option<&'static str> {
         (DType::F32, DType::U32) => Some("cast_f32_u32"),
         _ => None,
     }
-}
-
-/// Maps a typed slice to a new `Vec` during host-side dtype casts.
-///
-/// # Examples
-///
-/// ```ignore
-/// cast_vec!(data, f16, |v| f16::from_f32(*v))
-/// // => Vec<f16>
-/// ```
-macro_rules! cast_vec {
-    ($data:expr, $ty:ty, $map:expr) => {
-        $data.iter().map($map).collect::<Vec<$ty>>()
-    };
-}
-
-fn cast_cpu_storage(storage: &CpuStorage, dtype: DType) -> Result<CpuStorage> {
-    use half::{bf16, f16};
-    Ok(match (storage, dtype) {
-        (CpuStorage::F32(data), DType::F16) => {
-            CpuStorage::F16(cast_vec!(data, f16, |v| f16::from_f32(*v)))
-        }
-        (CpuStorage::F16(data), DType::F32) => {
-            CpuStorage::F32(cast_vec!(data, f32, |v| v.to_f32()))
-        }
-        (CpuStorage::F32(data), DType::BF16) => {
-            CpuStorage::BF16(cast_vec!(data, bf16, |v| bf16::from_f32(*v)))
-        }
-        (CpuStorage::BF16(data), DType::F32) => {
-            CpuStorage::F32(cast_vec!(data, f32, |v| v.to_f32()))
-        }
-        (s, _) if s.dtype() == dtype => s.clone(),
-        (s, dt) => {
-            return Err(WgpuError::Message(format!(
-                "cpu cast {:?} -> {dt:?} not implemented",
-                s.dtype()
-            )));
-        }
-    })
 }
 
 pub(crate) fn cpu_storage_as_bytes(storage: &CpuStorage) -> Result<(&[u8], usize)> {
@@ -777,5 +740,24 @@ mod tests {
             device.storage_buffer_offset_alignment(),
             device.device().limits().min_storage_buffer_offset_alignment
         );
+    }
+
+    #[test]
+    fn cast_f64_to_f32_noop_device() {
+        let device = WgpuDevice::new_test(true, 1024);
+        let storage = WgpuStorage::from_cpu(
+            &device,
+            &CpuStorage::F64(vec![1.0, 2.5, std::f64::consts::PI]),
+        )
+        .unwrap();
+        let layout = Layout::contiguous(&Shape::from((3,)));
+        let f32 = storage.to_dtype(&layout, DType::F32).unwrap();
+        let cpu = f32.to_cpu_storage().unwrap();
+        let CpuStorage::F32(v) = cpu else {
+            panic!("expected f32");
+        };
+        assert!((v[0] - 1.0).abs() < 1e-6);
+        assert!((v[1] - 2.5).abs() < 1e-6);
+        assert!((v[2] - std::f32::consts::PI).abs() < 1e-5);
     }
 }
