@@ -1944,6 +1944,18 @@ fn copy2d_shader_parallel_elems(params: &Copy2dParams, dtype: DType) -> usize {
     params.d1 * params.d2
 }
 
+/// Reinterpret element strides/offsets as byte indices for the packed `copy2d_u8` kernel.
+fn copy2d_params_as_bytes(params: &Copy2dParams, bytes_per_elem: usize) -> Copy2dParams {
+    Copy2dParams {
+        d1: params.d1,
+        d2: params.d2 * bytes_per_elem,
+        src_stride: params.src_stride * bytes_per_elem,
+        dst_stride: params.dst_stride * bytes_per_elem,
+        src_offset: params.src_offset * bytes_per_elem,
+        dst_offset: params.dst_offset * bytes_per_elem,
+    }
+}
+
 fn try_copy2d_blit(src: &WgpuStorage, dst: &WgpuStorage, params: &Copy2dParams) -> Result<bool> {
     if params.src_stride != params.d2 || params.dst_stride != params.d2 {
         return Ok(false);
@@ -2025,6 +2037,12 @@ pub fn dispatch_copy2d(
     }
     if dtype == DType::U8 {
         return dispatch_copy2d_shader(src, dst, params, DType::U8);
+    }
+    // Integer and f64 tensors share the byte-packed copy2d_u8 path when blit cannot run
+    // (non-matching strides). WGSL has no i64 type; raw byte copy is dtype-agnostic.
+    if dtype.is_int() || dtype == DType::F64 {
+        let byte_params = copy2d_params_as_bytes(&params, dtype.size_in_bytes());
+        return dispatch_copy2d_shader(src, dst, byte_params, DType::U8);
     }
     require_float(dtype, "copy2d").map_err(|e| WgpuError::Message(e.to_string()))?;
     let device = src.device();
@@ -3064,6 +3082,23 @@ mod tests {
             panic!("expected f32");
         };
         assert_eq!(v.len(), 4);
+    }
+
+    #[test]
+    fn copy2d_i64_cat_matches_cpu() -> CandleResult<()> {
+        use crate::{Device, Tensor};
+
+        let cpu = Device::Cpu;
+        let gpu = Device::new_wgpu()?;
+        let a = Tensor::from_vec(vec![1i64, 2, 3, 4, 5, 6], (2, 3), &cpu)?;
+        let b = Tensor::from_vec(vec![7i64, 8, 9, 10, 11, 12], (2, 3), &cpu)?;
+        let cpu_cat = Tensor::cat(&[&a, &b], 1)?;
+        let gpu_cat = Tensor::cat(
+            &[&a.to_device(&gpu)?, &b.to_device(&gpu)?],
+            1,
+        )?;
+        assert_eq!(cpu_cat.to_vec2::<i64>()?, gpu_cat.to_vec2::<i64>()?);
+        Ok(())
     }
 
     #[test]
