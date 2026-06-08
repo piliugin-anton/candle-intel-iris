@@ -677,7 +677,11 @@ impl Tensor {
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             #[cfg(feature = "wgpu")]
-            Storage::Wgpu(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Wgpu(storage) => {
+                let cpu = storage.to_cpu_storage_with_layout(self.layout())?;
+                let data = S::cpu_storage_as_slice(&cpu)?;
+                Ok(data[0])
+            }
         }
     }
 
@@ -1951,7 +1955,10 @@ impl Tensor {
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             #[cfg(feature = "wgpu")]
-            Storage::Wgpu(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Wgpu(storage) => {
+                let cpu = storage.to_cpu_storage_with_layout(self.layout())?;
+                Ok(S::cpu_storage_as_slice(&cpu)?.to_vec())
+            }
         }
     }
 
@@ -1984,7 +1991,15 @@ impl Tensor {
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             #[cfg(feature = "wgpu")]
-            Storage::Wgpu(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Wgpu(storage) => {
+                let cpu = storage.to_cpu_storage_with_layout(self.layout())?;
+                let data = S::cpu_storage_as_slice(&cpu)?;
+                let mut rows = vec![];
+                for idx_row in 0..dim1 {
+                    rows.push(data[idx_row * dim2..(idx_row + 1) * dim2].to_vec());
+                }
+                Ok(rows)
+            }
         }
     }
 
@@ -2027,7 +2042,21 @@ impl Tensor {
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             #[cfg(feature = "wgpu")]
-            Storage::Wgpu(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Wgpu(storage) => {
+                let cpu = storage.to_cpu_storage_with_layout(self.layout())?;
+                let data = S::cpu_storage_as_slice(&cpu)?;
+                let dim23 = dim2 * dim3;
+                let mut top_rows = vec![];
+                for idx1 in 0..dim1 {
+                    let slice = &data[idx1 * dim23..(idx1 + 1) * dim23];
+                    let mut rows = vec![];
+                    for idx2 in 0..dim2 {
+                        rows.push(slice[idx2 * dim3..(idx2 + 1) * dim3].to_vec());
+                    }
+                    top_rows.push(rows);
+                }
+                Ok(top_rows)
+            }
         }
     }
 
@@ -2377,6 +2406,9 @@ impl Tensor {
         if self.device().same_device(device) {
             Ok(self.clone())
         } else {
+            let wgpu_to_cpu = cfg!(feature = "wgpu")
+                && matches!(device, Device::Cpu)
+                && matches!(&*self.storage(), Storage::Wgpu(_));
             let storage = match (&*self.storage(), device) {
                 (Storage::Cpu(storage), Device::Cuda(cuda)) => {
                     Storage::Cuda(cuda.storage_from_cpu_storage(storage)?)
@@ -2391,7 +2423,9 @@ impl Tensor {
                 (Storage::Cuda(storage), Device::Cpu) => Storage::Cpu(storage.to_cpu_storage()?),
                 (Storage::Metal(storage), Device::Cpu) => Storage::Cpu(storage.to_cpu_storage()?),
                 #[cfg(feature = "wgpu")]
-                (Storage::Wgpu(storage), Device::Cpu) => Storage::Cpu(storage.to_cpu_storage()?),
+                (Storage::Wgpu(storage), Device::Cpu) => {
+                    Storage::Cpu(storage.to_cpu_storage_with_layout(self.layout())?)
+                }
                 (Storage::Cuda(storage), Device::Cuda(cuda)) => {
                     // can't clone storage if it's the same device because of the underlying device ptr
                     let dst_storage = storage.transfer_to_device(cuda)?;
@@ -2406,11 +2440,16 @@ impl Tensor {
                     )
                 }
             };
+            let layout = if wgpu_to_cpu {
+                Layout::contiguous(self.shape())
+            } else {
+                self.layout.clone()
+            };
             let op = BackpropOp::new1(self, Op::ToDevice);
             let tensor_ = Tensor_ {
                 id: TensorId::new(),
                 storage: Arc::new(RwLock::new(storage)),
-                layout: self.layout.clone(),
+                layout,
                 op,
                 is_variable: false,
                 dtype: self.dtype,

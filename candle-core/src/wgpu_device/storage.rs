@@ -1,4 +1,5 @@
-use super::async_io::wait_for_buffer_map;
+use super::async_io::{copy_aligned_range, wait_for_buffer_map};
+use super::mapped_buffer::MAPPED_READ_USAGE;
 use super::error::{Result, WgpuError};
 use super::kernel::WgpuKernel;
 use super::mapped_buffer::MappedBacking;
@@ -202,32 +203,41 @@ impl WgpuStorage {
         }
     }
 
-    fn read_bytes(&self) -> Result<Vec<u8>> {
-        let size = self.byte_len() as u64;
+    fn read_bytes_region(&self, byte_offset: usize, byte_len: usize) -> Result<Vec<u8>> {
         match &self.backing {
-            BufferBacking::Mapped(m) => m.read_bytes(&self.device, size),
-            BufferBacking::DeviceLocal(buf) => read_bytes_staging(self.device(), buf, size),
+            BufferBacking::Mapped(m) => {
+                m.read_bytes_region(&self.device, byte_offset as u64, byte_len as u64)
+            }
+            BufferBacking::DeviceLocal(buf) => {
+                read_device_buffer_region(self.device(), buf, byte_offset, byte_len)
+            }
         }
     }
 
+    fn read_bytes(&self) -> Result<Vec<u8>> {
+        self.read_bytes_region(0, self.byte_len())
+    }
+
+    /// Read back only the tensor elements described by `layout` (dense CPU storage).
+    pub(crate) fn to_cpu_storage_with_layout(&self, layout: &Layout) -> CandleResult<CpuStorage> {
+        let elem_size = self.dtype.size_in_bytes();
+        if layout.is_contiguous() {
+            let byte_offset = layout.start_offset() * elem_size;
+            let byte_len = layout.shape().elem_count() * elem_size;
+            if byte_offset == 0 && byte_len == self.byte_len() {
+                return self.to_cpu_storage();
+            }
+            let bytes = self.read_bytes_region(byte_offset, byte_len).map_err(Error::from)?;
+            return bytes_to_cpu_storage(self.dtype, &bytes).map_err(Error::from);
+        }
+        let out = Self::alloc(self.device(), layout.shape(), self.dtype).map_err(Error::from)?;
+        let mut out_mut = out.clone();
+        ops::dispatch_copy_strided_src(self, &mut out_mut, 0, layout).map_err(Error::from)?;
+        out_mut.to_cpu_storage()
+    }
+
     fn to_cpu_typed<T: Clone>(&self) -> Result<Vec<T>> {
-        let bytes = self.read_bytes()?;
-        let elem_size = std::mem::size_of::<T>();
-        if bytes.len() % elem_size != 0 {
-            return Err(WgpuError::Message(format!(
-                "readback size {} is not a multiple of element size {elem_size}",
-                bytes.len()
-            )));
-        }
-        let count = bytes.len() / elem_size;
-        let mut out = Vec::with_capacity(count);
-        for chunk in bytes.chunks_exact(elem_size) {
-            // SAFETY: `chunk` is exactly `elem_size` bytes and aligned for `T` because the
-            // buffer length was validated as a multiple of `size_of::<T>()`.
-            let value = unsafe { std::ptr::read(chunk.as_ptr().cast::<T>()) };
-            out.push(value);
-        }
-        Ok(out)
+        bytes_to_typed_vec(&self.read_bytes()?)
     }
 
     fn cast_via_cpu(&self, layout: &Layout, dtype: DType) -> Result<Self> {
@@ -306,28 +316,31 @@ pub(crate) fn copy_buffer_region(
     })
 }
 
-fn read_bytes_staging(device: &WgpuDevice, src: &wgpu::Buffer, size: u64) -> Result<Vec<u8>> {
-    super::async_io::poll_device(device.device())?;
+/// Read a byte region from a device-local GPU buffer via a pooled staging buffer.
+pub(crate) fn read_device_buffer_region(
+    device: &WgpuDevice,
+    src: &wgpu::Buffer,
+    byte_offset: usize,
+    byte_len: usize,
+) -> Result<Vec<u8>> {
     let wgpu_device = device.device();
     let queue = device.queue();
+    let (copy_offset, copy_size, head_skip, out_len) = copy_aligned_range(byte_offset, byte_len);
 
-    let align = wgpu::COPY_BUFFER_ALIGNMENT;
-    let copy_size = size.div_ceil(align) * align;
-
-    let staging = wgpu_device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("wgpu readback staging"),
-        size: copy_size,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    let staging = device.allocator().allocate_mapped(
+        wgpu_device,
+        copy_size as usize,
+        MAPPED_READ_USAGE,
+        false,
+    )?;
 
     let mut encoder = wgpu_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wgpu readback"),
     });
-    encoder.copy_buffer_to_buffer(src, 0, &staging, 0, copy_size);
+    encoder.copy_buffer_to_buffer(src, copy_offset, &staging, 0, copy_size);
     queue.submit(Some(encoder.finish()));
 
-    let slice = staging.slice(..);
+    let slice = staging.slice(..copy_size);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
@@ -339,8 +352,48 @@ fn read_bytes_staging(device: &WgpuDevice, src: &wgpu::Buffer, size: u64) -> Res
     let mut bytes = mapped.to_vec();
     drop(mapped);
     staging.unmap();
-    bytes.truncate(size as usize);
+    bytes.drain(..head_skip);
+    bytes.truncate(out_len);
     Ok(bytes)
+}
+
+fn bytes_to_typed_vec<T: Clone>(bytes: &[u8]) -> Result<Vec<T>> {
+    let elem_size = std::mem::size_of::<T>();
+    if bytes.len() % elem_size != 0 {
+        return Err(WgpuError::Message(format!(
+            "readback size {} is not a multiple of element size {elem_size}",
+            bytes.len()
+        )));
+    }
+    let count = bytes.len() / elem_size;
+    let mut out = Vec::with_capacity(count);
+    for chunk in bytes.chunks_exact(elem_size) {
+        // SAFETY: `chunk` is exactly `elem_size` bytes and aligned for `T` because the
+        // buffer length was validated as a multiple of `size_of::<T>()`.
+        let value = unsafe { std::ptr::read(chunk.as_ptr().cast::<T>()) };
+        out.push(value);
+    }
+    Ok(out)
+}
+
+fn bytes_to_cpu_storage(dtype: DType, bytes: &[u8]) -> Result<CpuStorage> {
+    Ok(match dtype {
+        DType::U8 => CpuStorage::U8(bytes_to_typed_vec(bytes)?),
+        DType::U32 => CpuStorage::U32(bytes_to_typed_vec(bytes)?),
+        DType::I16 => CpuStorage::I16(bytes_to_typed_vec(bytes)?),
+        DType::I32 => CpuStorage::I32(bytes_to_typed_vec(bytes)?),
+        DType::I64 => CpuStorage::I64(bytes_to_typed_vec(bytes)?),
+        DType::BF16 => CpuStorage::BF16(bytes_to_typed_vec(bytes)?),
+        DType::F16 => CpuStorage::F16(bytes_to_typed_vec(bytes)?),
+        DType::F32 => CpuStorage::F32(bytes_to_typed_vec(bytes)?),
+        DType::F64 => CpuStorage::F64(bytes_to_typed_vec(bytes)?),
+        DType::F8E4M3 => CpuStorage::F8E4M3(bytes_to_typed_vec(bytes)?),
+        DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
+            return Err(WgpuError::Message(format!(
+                "unsupported dtype {dtype:?} for wgpu readback"
+            )));
+        }
+    })
 }
 
 const CAST_WG_SIZE: u32 = 32;

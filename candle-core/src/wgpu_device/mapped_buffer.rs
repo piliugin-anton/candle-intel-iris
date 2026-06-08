@@ -66,7 +66,7 @@ impl MappedStaging {
         Ok(())
     }
 
-    fn read_bytes(&self, device: &wgpu::Device, size: u64) -> Result<Vec<u8>> {
+    fn read_bytes_region(&self, device: &wgpu::Device, size: u64) -> Result<Vec<u8>> {
         self.map_async_read(device)?;
         let slice = self.buffer.slice(..size);
         let mapped = slice.get_mapped_range();
@@ -119,18 +119,32 @@ impl MappedBacking {
         &self.storage
     }
 
-    pub fn read_bytes(&self, device: &WgpuDevice, size: u64) -> Result<Vec<u8>> {
+    pub fn read_bytes_region(
+        &self,
+        device: &WgpuDevice,
+        src_byte_offset: u64,
+        byte_len: u64,
+    ) -> Result<Vec<u8>> {
         let wgpu_device = device.device();
         let queue = device.queue();
-        let align = wgpu::COPY_BUFFER_ALIGNMENT;
-        let copy_size = size.div_ceil(align) * align;
+        let (copy_offset, copy_size, head_skip, out_len) =
+            super::async_io::copy_aligned_range(src_byte_offset as usize, byte_len as usize);
         let mut encoder = wgpu_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("wgpu mapped readback"),
         });
-        encoder.copy_buffer_to_buffer(&self.storage, 0, self.read_staging.buffer(), 0, copy_size);
+        encoder.copy_buffer_to_buffer(
+            &self.storage,
+            copy_offset,
+            self.read_staging.buffer(),
+            0,
+            copy_size,
+        );
         queue.submit(Some(encoder.finish()));
-        let mut bytes = self.read_staging.read_bytes(wgpu_device, copy_size)?;
-        bytes.truncate(size as usize);
+        let mut bytes = self
+            .read_staging
+            .read_bytes_region(wgpu_device, copy_size)?;
+        bytes.drain(..head_skip);
+        bytes.truncate(out_len);
         Ok(bytes)
     }
 

@@ -4,7 +4,7 @@ use crate::quantized::k_quants::GgmlType;
 use crate::wgpu_device::{
     dispatch_dequant_f32, dispatch_qmatmul_q4_0, dispatch_qmatmul_q4_k, dispatch_qmatmul_q5_0,
     dispatch_qmatmul_q8_0, dispatch_quant_f32, gpu_dequant_supported, gpu_quant_supported,
-    upload_quant_weights, wait_for_buffer_map, WgpuStorage, STORAGE_BUFFER_USAGE,
+    read_device_buffer_region, upload_quant_weights, WgpuStorage, STORAGE_BUFFER_USAGE,
 };
 use crate::{backend::BackendStorage, CpuStorage, DType, Layout, Result, Shape, WgpuDevice};
 use std::sync::Arc;
@@ -323,26 +323,5 @@ fn as_t_slice<T>(data: &[u8]) -> &[T] {
 }
 
 fn read_buffer_bytes(device: &WgpuDevice, buffer: &wgpu::Buffer, size: usize) -> Result<Vec<u8>> {
-    let wgpu_device = device.device();
-    let queue = device.queue();
-    let staging = wgpu_device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("candle qtensor readback"),
-        size: size as u64,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut encoder = wgpu_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("candle qtensor readback"),
-    });
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size as u64);
-    queue.submit(Some(encoder.finish()));
-
-    let slice = staging.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    wait_for_buffer_map(wgpu_device, &rx)?;
-    let mapped = slice.get_mapped_range();
-    Ok(mapped.to_vec())
+    read_device_buffer_region(device, buffer, 0, size).map_err(Into::into)
 }

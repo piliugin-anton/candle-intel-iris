@@ -58,6 +58,7 @@ pub use ops::{
 pub use shader_cache::{ShaderCache, STANDARD_KERNEL_LAYOUT_KEY};
 pub use sort::{dispatch_arg_sort_last_dim, gpu_argsort_supported, MAX_ARGSORT_NCOLS_PAD};
 pub use storage::{buffer_offset, BufferBacking, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
+pub(crate) use storage::read_device_buffer_region;
 
 use crate::backend::BackendDevice;
 use crate::{CpuStorage, DType, Error, Result as CandleResult, Shape};

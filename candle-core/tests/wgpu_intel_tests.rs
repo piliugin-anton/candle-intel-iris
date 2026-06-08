@@ -41,6 +41,20 @@ fn pinned_mapped_alloc() -> candle_core::Result<()> {
 
 #[test]
 #[ignore = "requires Intel GPU with wgpu backend"]
+fn wgpu_layout_readback_reads_slice_only() -> candle_core::Result<()> {
+    use candle_core::{Device, IndexOp, Tensor};
+
+    let device = Device::new_wgpu()?;
+    let t = Tensor::from_vec((0..20).map(|v| v as f32).collect(), (20,), &device)?;
+    let slice = t.i((9..12,))?;
+    assert_eq!(slice.to_vec1::<f32>()?, vec![9.0, 10.0, 11.0]);
+    let scalar = t.i((15,))?;
+    assert_eq!(scalar.to_scalar::<f32>()?, 15.0);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires Intel GPU with wgpu backend"]
 fn wgpu_add_f32() -> candle_core::Result<()> {
     let device = Device::new_wgpu()?;
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), &device)?;
