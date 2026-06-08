@@ -83,6 +83,7 @@ pub struct WgpuDevice {
     queue: wgpu::Queue,
     adapter_info: wgpu::AdapterInfo,
     caps: IntelCaps,
+    storage_buffer_offset_alignment: u32,
     shader_cache: ShaderCache,
     allocator: Allocator,
     rng_seed: Arc<RwLock<u64>>,
@@ -91,6 +92,8 @@ pub struct WgpuDevice {
 
 impl WgpuDevice {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let storage_buffer_offset_alignment =
+            device.limits().min_storage_buffer_offset_alignment;
         Self {
             id: DeviceId::new(),
             device,
@@ -109,6 +112,7 @@ impl WgpuDevice {
                 transient_saves_memory: false,
             },
             caps: IntelCaps::default_fallback(),
+            storage_buffer_offset_alignment,
             shader_cache: ShaderCache::new(),
             allocator: Allocator::new(),
             rng_seed: Arc::new(RwLock::new(rng::DEFAULT_RNG_SEED)),
@@ -130,6 +134,11 @@ impl WgpuDevice {
 
     pub fn caps(&self) -> &IntelCaps {
         &self.caps
+    }
+
+    /// Minimum byte alignment required for storage-buffer bind offsets on this device.
+    pub fn storage_buffer_offset_alignment(&self) -> u32 {
+        self.storage_buffer_offset_alignment
     }
 
     pub fn device(&self) -> &wgpu::Device {

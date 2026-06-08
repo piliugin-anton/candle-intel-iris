@@ -107,3 +107,27 @@ fn wgpu_sum_f32() -> candle_core::Result<()> {
     assert_eq!(s.to_vec1::<f32>()?, vec![3.0, 7.0]);
     Ok(())
 }
+
+#[test]
+#[ignore = "requires Intel GPU with wgpu backend"]
+fn wgpu_narrow_view_unaligned_offset() -> candle_core::Result<()> {
+    let cpu = Device::Cpu;
+    let gpu = Device::new_wgpu()?;
+
+    let base_cpu = Tensor::from_vec((0..20).map(|i| i as f32).collect::<Vec<_>>(), (1, 20), &cpu)?;
+    let a_cpu = base_cpu.narrow(1, 9, 3)?;
+    let b_cpu = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (1, 3), &cpu)?;
+    let add_cpu = a_cpu.add(&b_cpu)?;
+    let mul_cpu = a_cpu.mul(&b_cpu)?;
+
+    let base_gpu =
+        Tensor::from_vec((0..20).map(|i| i as f32).collect::<Vec<_>>(), (1, 20), &gpu)?;
+    let a_gpu = base_gpu.narrow(1, 9, 3)?;
+    let b_gpu = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (1, 3), &gpu)?;
+    let add_gpu = a_gpu.add(&b_gpu)?;
+    let mul_gpu = a_gpu.mul(&b_gpu)?;
+
+    assert_eq!(add_gpu.to_vec2::<f32>()?, add_cpu.to_vec2::<f32>()?);
+    assert_eq!(mul_gpu.to_vec2::<f32>()?, mul_cpu.to_vec2::<f32>()?);
+    Ok(())
+}

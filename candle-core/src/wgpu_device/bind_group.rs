@@ -10,6 +10,14 @@ fn params_buffer_usage() -> wgpu::BufferUsages {
     wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
 }
 
+fn debug_assert_storage_bind_offset(device: &wgpu::Device, offset: u64) {
+    let align = device.limits().min_storage_buffer_offset_alignment as u64;
+    debug_assert!(
+        offset == 0 || offset.is_multiple_of(align),
+        "storage buffer bind offset {offset} must be 0 or a multiple of {align}"
+    );
+}
+
 /// Per-tensor layout metadata mirrored in WGSL `struct TensorLayout`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -483,6 +491,9 @@ impl BindGroupBuilder {
             buffer: input0.buffer,
             offset_in_bytes: input0.offset_in_bytes,
         });
+        debug_assert_storage_bind_offset(device, args.output.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, input0.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, input1.offset_in_bytes);
 
         Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("candle standard kernel bind group"),
@@ -535,6 +546,9 @@ impl BindGroupBuilder {
             buffer: input0.buffer,
             offset_in_bytes: input0.offset_in_bytes,
         });
+        debug_assert_storage_bind_offset(device, output.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, input0.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, input1.offset_in_bytes);
 
         Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("candle kernel bind group"),
@@ -700,6 +714,10 @@ impl ExtendedBindGroupBuilder {
         let layout = self.layout.get_or_create(device)?;
         let uniform_buffer =
             BindGroupBuilder::create_uniform_buffer_bytes(device, queue, args.uniform_bytes);
+        debug_assert_storage_bind_offset(device, args.output.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, args.input0.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, args.input1.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, args.input2.offset_in_bytes);
 
         Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("candle extended kernel bind group"),
@@ -873,6 +891,11 @@ impl SdpaBindGroupBuilder {
         let layout = self.layout.get_or_create(device)?;
         let uniform_buffer =
             BindGroupBuilder::create_uniform_buffer_bytes(device, queue, args.uniform_bytes);
+        debug_assert_storage_bind_offset(device, args.output.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, args.q.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, args.k.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, args.v.offset_in_bytes);
+        debug_assert_storage_bind_offset(device, args.mask.offset_in_bytes);
 
         Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("candle sdpa kernel bind group"),
@@ -1235,5 +1258,25 @@ mod tests {
         assert_eq!(uniform.num_dims, 2);
         assert_eq!(uniform.dims[..2], [2, 3]);
         assert_eq!(uniform.strides[..2], [3, 1]);
+    }
+
+    #[test]
+    fn storage_buffer_bind_offsets_are_zero() {
+        use super::super::storage::{buffer_offset, WgpuStorage};
+        use crate::{DType, Shape, WgpuDevice};
+
+        let device = WgpuDevice::new_test(true, 1024);
+        let dtypes = [DType::F32, DType::F16, DType::BF16, DType::U32, DType::U8];
+        for dtype in dtypes {
+            let storage = WgpuStorage::alloc(&device, &Shape::from((20,)), dtype).unwrap();
+            let layout = Layout::contiguous_with_offset((3,), 9);
+            let binding = buffer_offset(&storage, &layout);
+            assert_eq!(binding.offset_in_bytes, 0, "dtype {dtype:?}");
+            assert_eq!(
+                TensorLayoutUniform::from_layout(&layout).offset,
+                9,
+                "logical offset must remain in uniforms for {dtype:?}"
+            );
+        }
     }
 }

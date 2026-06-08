@@ -43,17 +43,24 @@ impl BufferBacking {
     }
 }
 
-/// Binding view into a wgpu buffer at the byte offset implied by a Candle [`Layout`].
+/// Binding view into a wgpu storage buffer.
+///
+/// `offset_in_bytes` is always zero: WGSL kernels index from the buffer start using
+/// element offsets in the uniform block (`TensorLayoutUniform::offset`, etc.).
+/// Non-zero bind offsets would violate `min_storage_buffer_offset_alignment`.
 #[derive(Debug, Clone)]
 pub struct BufferOffset<'a> {
     pub buffer: &'a wgpu::Buffer,
     pub offset_in_bytes: u64,
 }
 
-pub fn buffer_offset<'a>(storage: &'a WgpuStorage, layout: &Layout) -> BufferOffset<'a> {
+/// Returns a storage-buffer binding for `storage`/`layout`.
+///
+/// The logical element offset lives in kernel uniforms, not in the bind-group offset.
+pub fn buffer_offset<'a>(storage: &'a WgpuStorage, _layout: &Layout) -> BufferOffset<'a> {
     BufferOffset {
         buffer: storage.backing.buffer(),
-        offset_in_bytes: (layout.start_offset() * storage.dtype.size_in_bytes()) as u64,
+        offset_in_bytes: 0,
     }
 }
 
@@ -725,5 +732,50 @@ mod tests {
         let storage = WgpuStorage::from_bytes(&device, bytes, 3, DType::F32).unwrap();
         assert_eq!(storage.dtype(), DType::F32);
         assert_eq!(storage.elem_count(), 3);
+    }
+
+    #[test]
+    fn buffer_offset_binds_at_zero_with_nonzero_layout() {
+        let device = WgpuDevice::new_test(true, 1024);
+        let storage = WgpuStorage::alloc(&device, &Shape::from((20,)), DType::F32).unwrap();
+        // start_offset=9 → byte offset 36 would fail min_storage_buffer_offset_alignment=32
+        let layout = Layout::contiguous_with_offset((3,), 9);
+        let binding = buffer_offset(&storage, &layout);
+        assert_eq!(binding.offset_in_bytes, 0);
+        assert!(std::ptr::eq(
+            binding.buffer,
+            storage.backing.buffer().as_ref()
+        ));
+    }
+
+    #[test]
+    fn buffer_offset_zero_for_unaligned_dtypes() {
+        let device = WgpuDevice::new_test(true, 1024);
+        let cases = [
+            (Shape::from((20,)), DType::F32, 9usize),
+            (Shape::from((20,)), DType::F16, 9usize),
+            (Shape::from((20,)), DType::BF16, 9usize),
+            (Shape::from((40,)), DType::U32, 9usize),
+            (Shape::from((40,)), DType::U8, 36usize),
+        ];
+        for (shape, dtype, start_offset) in cases {
+            let storage = WgpuStorage::alloc(&device, &shape, dtype).unwrap();
+            let layout = Layout::contiguous_with_offset((3,), start_offset);
+            let binding = buffer_offset(&storage, &layout);
+            assert_eq!(
+                binding.offset_in_bytes, 0,
+                "dtype {dtype:?} start_offset {start_offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn device_reports_storage_buffer_offset_alignment() {
+        let device = WgpuDevice::new_test(true, 1024);
+        assert!(device.storage_buffer_offset_alignment() > 0);
+        assert_eq!(
+            device.storage_buffer_offset_alignment(),
+            device.device().limits().min_storage_buffer_offset_alignment
+        );
     }
 }

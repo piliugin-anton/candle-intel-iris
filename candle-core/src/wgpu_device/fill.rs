@@ -1,7 +1,7 @@
 use super::bind_group::{BindGroupBuilder, KernelUniforms};
 use super::error::Result;
 use super::kernel::{elemwise_workgroup_count, WgpuKernel};
-use super::storage::{BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
+use super::storage::{buffer_offset, BufferOffset, WgpuStorage, STORAGE_BUFFER_USAGE};
 use crate::backend::BackendStorage;
 use crate::scalar::Scalar;
 use crate::wgsl::{CONST_SET_BF16, CONST_SET_F16, CONST_SET_F32, CONST_SET_U32, CONST_SET_U8};
@@ -38,11 +38,7 @@ fn dispatch_const_set_kernel(
         buffer: dummy_buf.as_ref(),
         offset_in_bytes: 0,
     };
-    // Layout start offset lives in the uniform block; bind at 0 for wgpu alignment rules.
-    let output = BufferOffset {
-        buffer: storage.buffer(),
-        offset_in_bytes: 0,
-    };
+    let output = buffer_offset(storage, layout);
     let bind_group = BindGroupBuilder::new().create_bind_group_bytes(
         device.device(),
         device.queue(),

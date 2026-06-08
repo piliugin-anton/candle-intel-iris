@@ -93,12 +93,15 @@ impl WgpuDevice {
         adapter_info: AdapterInfo,
         caps: IntelCaps,
     ) -> Self {
+        let storage_buffer_offset_alignment =
+            device.limits().min_storage_buffer_offset_alignment;
         Self {
             id: super::DeviceId::new(),
             device,
             queue,
             adapter_info,
             caps,
+            storage_buffer_offset_alignment,
             shader_cache: super::ShaderCache::new(),
             allocator: super::Allocator::new(),
             rng_seed: std::sync::Arc::new(std::sync::RwLock::new(super::rng::DEFAULT_RNG_SEED)),
