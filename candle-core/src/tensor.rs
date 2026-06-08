@@ -2406,9 +2406,16 @@ impl Tensor {
         if self.device().same_device(device) {
             Ok(self.clone())
         } else {
-            let wgpu_to_cpu = cfg!(feature = "wgpu")
-                && matches!(device, Device::Cpu)
-                && matches!(&*self.storage(), Storage::Wgpu(_));
+            let wgpu_to_cpu = {
+                #[cfg(feature = "wgpu")]
+                {
+                    matches!(device, Device::Cpu) && matches!(&*self.storage(), Storage::Wgpu(_))
+                }
+                #[cfg(not(feature = "wgpu"))]
+                {
+                    false
+                }
+            };
             let storage = match (&*self.storage(), device) {
                 (Storage::Cpu(storage), Device::Cuda(cuda)) => {
                     Storage::Cuda(cuda.storage_from_cpu_storage(storage)?)
